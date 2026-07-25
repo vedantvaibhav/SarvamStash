@@ -583,16 +583,22 @@ final class TranscriptionService: NSObject, ObservableObject {
     - Do not start with any label like "Overview:", "Summary:", "Key Points:", etc.
     """
 
-    /// Maps the AX-paste outcome to a pill confirmation message, or nil
-    /// when the pill should hide silently. Only the read-back-verified
-    /// Strategy 1 path earns "Pasted ✓"; the other outcomes return nil so
-    /// the pill goes from processing to invisible. The transcript is
+    /// Maps the AX-paste outcome to a pill confirmation message, or nil when
+    /// the pill should hide silently.
+    ///
+    /// Every outcome currently returns nil: on a verified paste the user
+    /// already watched the text land in the field they were typing into, so
+    /// "Pasted ✓" was confirming something they could see. The pill just
+    /// disappears.
+    ///
+    /// That means success and failure are indistinguishable right now — the
+    /// pill vanishes either way. Intended for this chunk. The failure case
+    /// gets its own treatment (2-line preview + Copy button morph) in Chunk 3;
+    /// see the marker in `deliverTranscriptShort`. The transcript is
     /// recoverable in Notes regardless of paste outcome.
     private func pillCopyFor(_ result: AutoPasteService.InsertResult) -> String? {
         switch result {
-        case .verifiedPasted:
-            return "Pasted ✓"
-        case .attemptedPaste, .noPermission, .insertionFailed:
+        case .verifiedPasted, .attemptedPaste, .noPermission, .insertionFailed:
             return nil
         }
     }
@@ -650,7 +656,53 @@ final class TranscriptionService: NSObject, ObservableObject {
         }
         #endif
 
+        // STT: Sarvam Saaras first, OpenAI Whisper as the fallback.
+        //
+        // The fallback runs on THIS attempt, not as a separate queued one.
+        // Treating the two providers as independently-retried paths would put
+        // Sarvam's failures through the retry queue's backoff schedule before
+        // OpenAI was ever tried — minutes of waiting for a transcript that
+        // OpenAI could have returned immediately.
+        //
+        // Auth failure (Sarvam 403) is the sharpest case: no amount of
+        // backoff fixes a bad subscription key, so it fails over at once and
+        // is never queued on its own account. Every other Sarvam failure —
+        // transport, rate limit, 5xx, unparseable body — also falls through
+        // to Whisper here. Only Whisper's outcome decides whether this
+        // attempt gets queued, which keeps the existing retry semantics
+        // exactly as they were.
+        var sarvamText: String?
+        if !SarvamConstants.apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let mode = await MainActor.run { AppSettings.shared.sarvamOutputMode }
+            do {
+                let result = try await SarvamSTTClient().transcribe(audioData: audioData, mode: mode)
+                sarvamText = result.text
+                #if DEBUG
+                print("[Transcription] Saaras ok (mode=\(mode.sarvamMode), detected=\(result.languageCode ?? "nil"))")
+                #endif
+            } catch let sarvamError as SarvamSTTError {
+                #if DEBUG
+                let reason = sarvamError.isAuth ? "auth (403) — failing over immediately, not queueing"
+                                                : "\(sarvamError)"
+                print("[Transcription] Saaras failed: \(reason); falling back to Whisper on this attempt")
+                #endif
+                if sarvamError.isAuth {
+                    reportToSlack(error: "Sarvam auth failed (403) — fell back to OpenAI",
+                                  durationSeconds: metadata.durationSeconds)
+                }
+            } catch {
+                #if DEBUG
+                print("[Transcription] Saaras failed: \(error); falling back to Whisper on this attempt")
+                #endif
+            }
+        }
+
         let whisperResponse: WhisperResponse
+        if let sarvamText {
+            // Saaras succeeded — skip Whisper and reuse the same downstream
+            // pipeline (sanitise → LLM cleanup → deliver) unchanged.
+            whisperResponse = WhisperResponse(text: sarvamText)
+        } else {
         do {
             whisperResponse = try await callWhisper(audioData: audioData)
         } catch let urlError as URLError {
@@ -677,6 +729,7 @@ final class TranscriptionService: NSObject, ObservableObject {
             // catch chain to add a specific transient branch for those.
             if isFirstAttempt { await clearProcessingHonoringFloor() }
             throw error
+        }
         }
 
         let rawTranscript = whisperResponse.text
@@ -1080,15 +1133,22 @@ final class TranscriptionService: NSObject, ObservableObject {
         // Phase 1 — save raw immediately so the user has a note even if cleanup fails.
         let rawNoteId = notesStorage?.saveQuickNote(text: text, durationSeconds: durationSeconds)
 
-        // Phase 2 — pasteboard + AutoPaste (short-clip primary delivery).
-        // Use the RAW text for the immediate paste; cleanup only refines the
-        // saved note, never the paste content.
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(text, forType: .string)
+        // Phase 2 — AutoPaste (short-clip primary delivery). Uses the RAW
+        // text; cleanup only refines the saved note, never the paste content.
+        //
+        // The app does NOT write to the clipboard. It previously cleared and
+        // replaced the user's pasteboard on every short transcription, which
+        // destroys whatever they had copied — unacceptable as an automatic
+        // side effect, on success or failure.
         let pasteResult = AutoPasteService.shared.attemptInsert(text: text)
         if let pillCopy = pillCopyFor(pasteResult) {
             showCompletion(pillCopy)
         }
+        // CHUNK 3 GOES HERE: when `pasteResult` is anything other than
+        // `.verifiedPasted`, morph the pill into the 2-line transcript
+        // preview + explicit "Copy" button, so the clipboard is only ever
+        // written by a deliberate user action. Until then every outcome
+        // hides the pill silently and the transcript is recovered from Notes.
 
         // Phase 3 — async cleanup, update note in place on success.
         // Capture [weak self] only — notesStorage is a `weak var` on the service,
