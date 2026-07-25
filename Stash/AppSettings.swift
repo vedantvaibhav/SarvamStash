@@ -11,7 +11,6 @@ extension Notification.Name {
     static let quickPanelClearDroppedFiles  = Notification.Name("QuickPanelClearDroppedFiles")
     static let quickRecordHotkeyChanged     = Notification.Name("quickRecordHotkeyChanged")
     static let doubleTapQuickRecordChanged  = Notification.Name("DoubleTapQuickRecordChanged")
-    static let authCompleted                = Notification.Name("AuthCompleted")
     static let accessibilityStatusChanged   = Notification.Name("AccessibilityStatusChanged")
 }
 
@@ -105,15 +104,6 @@ final class AppSettings: ObservableObject {
         didSet { ud.set(launchAtLogin, forKey: Keys.launchAtLogin) }
     }
 
-    // MARK: Onboarding v2
-
-    /// First-time-user gate. Persisted under `onboardingV2Completed` (NOT the
-    /// retired `onboardingCompleted` key). When false, AppDelegate routes the
-    /// post-auth callback to the onboarding window instead of the panel.
-    @Published var hasCompletedOnboarding: Bool {
-        didSet { ud.set(hasCompletedOnboarding, forKey: Keys.hasCompletedOnboarding) }
-    }
-
     // MARK: Notes filter
 
     /// Active filter applied to the Notes tab list. Persisted as raw
@@ -153,9 +143,6 @@ final class AppSettings: ObservableObject {
         let savedLogin = ud.object(forKey: Keys.launchAtLogin) as? Bool
         launchAtLogin = savedLogin ?? false
 
-        let savedOnboarding = ud.object(forKey: Keys.hasCompletedOnboarding) as? Bool
-        hasCompletedOnboarding = savedOnboarding ?? false
-
         let savedNotesFilter = ud.string(forKey: Keys.notesActiveFilter) ?? NotesFilter.all.rawValue
         notesActiveFilter = NotesFilter(rawValue: savedNotesFilter) ?? .all
 
@@ -181,7 +168,6 @@ final class AppSettings: ObservableObject {
         static let quickRecordHotKeyCode      = "qp.quickRecordHotKeyCode"
         static let quickRecordHotKeyModifiers = "qp.quickRecordHotKeyModifiers"
         static let doubleTapQuickRecord       = "qp.doubleTapQuickRecord"
-        static let hasCompletedOnboarding     = "onboardingV2Completed"
         static let notesActiveFilter          = "qp.notesActiveFilter"
     }
 }

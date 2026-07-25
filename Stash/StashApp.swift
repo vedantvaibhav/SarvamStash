@@ -26,7 +26,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var hotkeyObserver: NSObjectProtocol?
     private var quickRecordHotkeyObserver: NSObjectProtocol?
     private var doubleTapObserver: NSObjectProtocol?
-    private var authObserver: NSObjectProtocol?
     private var doubleTapMonitor: Any?
     private var doubleTapLocalMonitor: Any?
     private var doubleTapPressTime: Date?
@@ -34,15 +33,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let updaterManager = UpdaterManager()
 
     func applicationWillFinishLaunching(_ notification: Notification) {
-        // Register URL scheme handler before the app finishes launching so
-        // the system delivers any pending quickpanel:// events correctly.
-        NSAppleEventManager.shared().setEventHandler(
-            self,
-            andSelector: #selector(handleURL(_:withReplyEvent:)),
-            forEventClass: AEEventClass(kInternetEventClass),
-            andEventID: AEEventID(kAEGetURL)
-        )
-
         let bid = Bundle.main.bundleIdentifier
         let runningInstances = NSWorkspace.shared.runningApplications.filter {
             $0.bundleIdentifier == bid
@@ -51,26 +41,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSApp.terminate(nil)
             return
         }
-    }
-
-    /// Primary URL-scheme entry point — macOS delivers auth callbacks here when
-    /// the app is already running. `.onOpenURL` is unreliable for LSUIElement apps,
-    /// so the callback is handled at the NSApplication level.
-    func application(_ application: NSApplication, open urls: [URL]) {
-        for url in urls {
-            guard url.scheme == "stash" || url.scheme == "quickpanel" else { continue }
-            Task { @MainActor in
-                await AuthService.shared.handleOAuthCallback(url: url)
-            }
-        }
-    }
-
-    /// Receives the quickpanel://auth/callback redirect after Google OAuth.
-    @objc func handleURL(_ event: NSAppleEventDescriptor,
-                         withReplyEvent: NSAppleEventDescriptor) {
-        guard let urlString = event.paramDescriptor(forKeyword: AEKeyword(keyDirectObject))?.stringValue,
-              let url = URL(string: urlString) else { return }
-        Task { await AuthService.shared.handleOAuthCallback(url: url) }
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -148,21 +118,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
-        // Auth is independent of the recording pipeline — observer + check
-        // can wire up immediately. Signed-in state doesn't gate queue work.
-        authObserver = NotificationCenter.default.addObserver(
-            forName: .authCompleted,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            self?.handleAuthReady()
-        }
-
         panelController?.setup()
-
-        Task {
-            await AuthService.shared.checkSession()
-        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -171,32 +127,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let obs = hotkeyObserver { NotificationCenter.default.removeObserver(obs) }
         if let obs = quickRecordHotkeyObserver { NotificationCenter.default.removeObserver(obs) }
         if let obs = doubleTapObserver { NotificationCenter.default.removeObserver(obs) }
-        if let obs = authObserver { NotificationCenter.default.removeObserver(obs) }
         if let m = doubleTapMonitor { NSEvent.removeMonitor(m); doubleTapMonitor = nil }
         if let m = doubleTapLocalMonitor { NSEvent.removeMonitor(m); doubleTapLocalMonitor = nil }
-    }
-
-    // MARK: - Auth routing (onboarding gate)
-
-    /// Called on `.authCompleted`. Decides whether to present the onboarding
-    /// window or do nothing. Panel auto-show on fresh sign-in is handled by
-    /// AuthService's wrapped showPanel(); session-restore intentionally does
-    /// not auto-show the panel.
-    private func handleAuthReady() {
-        if AppSettings.shared.hasCompletedOnboarding { return }
-        // Signed in here = "advance past auth screen straight to hotkeys";
-        // not signed in = "start at auth screen" (only reachable via the
-        // status-item-click path, since handleAuthReady is fired by
-        // .authCompleted which implies signed-in by the time we arrive).
-        let start = AuthService.shared.isSignedIn ? 1 : 0
-        presentOnboarding(startStep: start)
-    }
-
-    private func presentOnboarding(startStep: Int = 0) {
-        OnboardingWindowController.shared.present(startStep: startStep) { [weak self] in
-            AppSettings.shared.hasCompletedOnboarding = true
-            self?.panelController?.togglePanel()
-        }
     }
 
     // MARK: - Hotkey registration
@@ -225,10 +157,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if ts.isRecording {
                     ts.stopRecording()
                 } else {
-                    guard AuthService.shared.isSignedIn else {
-                        self?.panelController?.showPanel()
-                        return
-                    }
                     ts.startRecording()
                 }
             }
@@ -296,10 +224,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if ts.isRecording {
             ts.stopRecording()
         } else {
-            guard AuthService.shared.isSignedIn else {
-                panelController?.showPanel()
-                return
-            }
             ts.startRecording()
         }
     }
@@ -325,12 +249,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         if event.type == .rightMouseDown {
             showStatusMenu()
-            return
-        }
-
-        if !AppSettings.shared.hasCompletedOnboarding {
-            let start = AuthService.shared.isSignedIn ? 1 : 0
-            presentOnboarding(startStep: start)
             return
         }
 
@@ -366,17 +284,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(quitItem)
 
         #if DEBUG
-        let resetItem = NSMenuItem(
-            title: "Reset onboarding (debug)",
-            action: #selector(resetOnboardingDebug),
-            keyEquivalent: ""
-        )
-        resetItem.target = self
-        menu.addItem(.separator())
-        menu.addItem(resetItem)
-
         // Debug ▸ submenu — fires every pill completion variant for UI testing.
         let debugItem = NSMenuItem(title: "Debug", action: nil, keyEquivalent: "")
+        menu.addItem(.separator())
         let debugSubmenu = NSMenu(title: "Debug")
         for (title, selector) in debugMenuItems() {
             let item = NSMenuItem(title: title, action: selector, keyEquivalent: "")
@@ -405,19 +315,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     #if DEBUG
-    @objc private func resetOnboardingDebug() {
-        // Sign the user out too so the reset reproduces the full first-launch
-        // path: onboarding lands at screen 1 (auth) every time. Without this,
-        // hasCompletedOnboarding=false + isSignedIn=true would route to
-        // screen 2 (hotkeys), skipping the auth screen we want to test.
-        Task { @MainActor in
-            await AuthService.shared.signOut()
-            AppSettings.shared.hasCompletedOnboarding = false
-            OnboardingWindowController.shared.reset()
-            presentOnboarding(startStep: 0)
-        }
-    }
-
     /// Map of debug-submenu titles to their `@objc` selectors. Defined as a
     /// method (not a stored array) so the selectors resolve at call-site
     /// against `self` rather than at file load.
@@ -434,7 +331,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             ("Test: simulate network failure on next upload", #selector(debugSimulateNextUploadFailure)),
             ("Test: drain retry queue now",  #selector(debugDrainRetryQueue)),
             ("Test: list pending sessions",  #selector(debugListPendingSessions)),
-            ("Test: show status notification", #selector(debugShowStatusNotification)),
         ]
     }
 
@@ -481,11 +377,5 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    @objc private func debugShowStatusNotification() {
-        // Toggle the real isWaitingOnRetry state so the floating pill morphs
-        // into the notification card via its normal sync() path.
-        guard let svc = panelController?.transcriptionService else { return }
-        svc.isWaitingOnRetry.toggle()
-    }
     #endif
 }

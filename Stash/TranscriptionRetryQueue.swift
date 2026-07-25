@@ -10,9 +10,14 @@ import Foundation
 /// serialized through the actor. Upload work runs on detached tasks and
 /// reports results back via `reportUploadResult`.
 ///
-/// Retry policy: 5 attempts with exponential backoff (2s, 8s, 30s, 2m, 10m
-/// between attempts). After 5 failures, the session remains in `pending/`
-/// indefinitely but does not auto-retry — user must manually retry.
+/// Retry policy: 5 attempts with exponential backoff (2s, 8s, 30s, 2m, 2m
+/// between attempts — the final step is capped at 2m so worst-case cumulative
+/// wait is ~4.7m rather than ~12.6m). After 5 failures the session is
+/// *evicted* from the queue rather than lingering forever: it's dropped from
+/// `pending/` and its audio is parked in `processed/` (retained, not deleted).
+/// Already-exhausted sessions found on disk are likewise evicted at bootstrap,
+/// so a stuck session can no longer sit in the queue showing "Waiting" across
+/// relaunches.
 actor TranscriptionRetryQueue {
     static let shared = TranscriptionRetryQueue()
 
@@ -36,13 +41,10 @@ actor TranscriptionRetryQueue {
     private var retryTimers: [UUID: Task<Void, Never>] = [:]
     /// Keyed by token so subscribers can unsubscribe on view teardown.
     private var observers: [UUID: ([PendingSessionMetadata]) -> Void] = [:]
-    /// Backoff-event subscribers (mirrors `observers`). Fired each time a
-    /// retry is scheduled with a non-zero delay, so the UI can show
-    /// "waiting on retry" with the current attempt count.
-    private var backoffObservers: [UUID: (BackoffEvent) -> Void] = [:]
-
     private let maxAttempts = 5
-    private let backoffSchedule: [TimeInterval] = [2, 8, 30, 120, 600]   // 2s, 8s, 30s, 2m, 10m
+    // Final step capped at 2m (was 10m) so a failing session exhausts its
+    // budget in ~4.7m cumulative instead of ~12.6m. See LAUNCH.md §4.4.
+    private let backoffSchedule: [TimeInterval] = [2, 8, 30, 120, 120]   // 2s, 8s, 30s, 2m, 2m
 
     /// Snapshot of current pending sessions for UI binding.
     func pendingSnapshot() -> [PendingSessionMetadata] {
@@ -83,37 +85,6 @@ actor TranscriptionRetryQueue {
         observers.removeValue(forKey: token)
     }
 
-    /// AsyncStream of backoff events — one per retry scheduled with delay > 0.
-    /// Mirrors `pendingStream`'s observer lifecycle. Subscribers (the
-    /// TranscriptionService) flip "waiting on retry" UI state on each event.
-    nonisolated func backoffStream() -> AsyncStream<BackoffEvent> {
-        AsyncStream { continuation in
-            let token = UUID()
-            Task {
-                await self.registerBackoffObserver(token: token) { event in
-                    continuation.yield(event)
-                }
-            }
-            continuation.onTermination = { @Sendable _ in
-                Task { await self.unregisterBackoffObserver(token: token) }
-            }
-        }
-    }
-
-    private func registerBackoffObserver(token: UUID, callback: @escaping (BackoffEvent) -> Void) {
-        backoffObservers[token] = callback
-    }
-
-    private func unregisterBackoffObserver(token: UUID) {
-        backoffObservers.removeValue(forKey: token)
-    }
-
-    private func notifyBackoffObservers(_ event: BackoffEvent) {
-        for callback in backoffObservers.values {
-            callback(event)
-        }
-    }
-
     private func notifyObservers() {
         let snapshot = pendingSnapshot()
         for callback in observers.values {
@@ -129,6 +100,18 @@ actor TranscriptionRetryQueue {
             let onDisk = try persistence.listPendingSessions()
             for meta in onDisk {
                 pending[meta.sessionUUID] = meta
+            }
+            // Evict sessions that already exhausted their retry budget in a
+            // prior run. Left in `pending`, they never auto-retry (drainNow
+            // skips them) yet keep driving `pendingCount` — that's what made
+            // the "Waiting" chip stick across relaunches. Eviction drops them
+            // from the queue and parks their audio in `processed/`.
+            for meta in onDisk where meta.attemptCount >= maxAttempts {
+                // `notify: false` — one notifyObservers() covers the whole
+                // sweep instead of re-sorting the pending set per eviction.
+                evict(sessionUUID: meta.sessionUUID,
+                      reason: "exhausted retries at bootstrap",
+                      notify: false)
             }
             notifyObservers()
             // Don't auto-drain at launch; wait for first reachability "satisfied"
@@ -228,17 +211,6 @@ actor TranscriptionRetryQueue {
 
     private func scheduleAttempt(sessionUUID: UUID, delay: TimeInterval) {
         retryTimers[sessionUUID]?.cancel()
-        // Emit a backoff event for delayed (real retry) scheduling only. The
-        // delay == 0 case is an immediate drain, not a wait, so it doesn't
-        // drive the "waiting on retry" UI.
-        if delay > 0 {
-            let attemptCount = pending[sessionUUID]?.attemptCount ?? 0
-            notifyBackoffObservers(BackoffEvent(
-                sessionUUID: sessionUUID,
-                attemptCount: attemptCount,
-                nextDelaySeconds: delay
-            ))
-        }
         // No [weak self] — Swift actors can't be weakly captured. The queue is
         // a singleton with the same lifetime as the app, so retaining it is
         // both required and harmless.
@@ -295,11 +267,13 @@ actor TranscriptionRetryQueue {
         try? meta.write(in: persistence)
         notifyObservers()
         guard meta.attemptCount < maxAttempts else {
-            // Exhausted auto-retries. Stays in pending for manual retry.
+            // Exhausted auto-retries — evict from the queue instead of letting
+            // it linger forever as a stuck "Waiting" session. Audio is parked
+            // in `processed/`, not deleted.
             #if DEBUG
-            print("[RetryQueue] giving up on \(sessionUUID) after \(meta.attemptCount) attempts (manual retry only)")
+            print("[RetryQueue] giving up on \(sessionUUID) after \(meta.attemptCount) attempts — evicting")
             #endif
-            retryTimers.removeValue(forKey: sessionUUID)
+            evict(sessionUUID: sessionUUID, reason: "exhausted \(meta.attemptCount) attempts")
             return
         }
         // Schedule next attempt using the backoff schedule. `attemptCount`
@@ -312,13 +286,27 @@ actor TranscriptionRetryQueue {
         scheduleAttempt(sessionUUID: sessionUUID, delay: delay)
     }
 
+    /// Remove a session from the active queue for good. Used when a session has
+    /// exhausted its retry budget (or is otherwise orphaned). Cancels its retry
+    /// timer, drops it from `pending`, and moves `pending/<uuid>/` → `processed/`
+    /// so the audio is retained (not deleted) while the session stops counting
+    /// toward `pendingCount` / the "Waiting" chip and is never retried again.
+    private func evict(sessionUUID: UUID, reason: String, notify: Bool = true) {
+        retryTimers[sessionUUID]?.cancel()
+        retryTimers.removeValue(forKey: sessionUUID)
+        pending.removeValue(forKey: sessionUUID)
+        do {
+            try persistence.archivePending(sessionUUID: sessionUUID)
+        } catch {
+            #if DEBUG
+            print("[RetryQueue] evict: archivePending failed for \(sessionUUID): \(error) — \(reason)")
+            #endif
+        }
+        if notify { notifyObservers() }
+        #if DEBUG
+        print("[RetryQueue] evicted \(sessionUUID): \(reason)")
+        #endif
+    }
+
 }
 
-/// Emitted by `TranscriptionRetryQueue.backoffStream()` whenever a retry is
-/// scheduled with a non-zero delay. Sendable so it can cross the actor
-/// boundary into the AsyncStream consumer.
-struct BackoffEvent: Sendable {
-    let sessionUUID: UUID
-    let attemptCount: Int
-    let nextDelaySeconds: TimeInterval
-}

@@ -169,7 +169,6 @@ struct FileDropListContent: View {
                     subtitle: "Drag and drop your files for quick access"
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .padding(.vertical, 20)
             } else {
                 GeometryReader { geo in
                     fileGrid(availableWidth: geo.size.width)
