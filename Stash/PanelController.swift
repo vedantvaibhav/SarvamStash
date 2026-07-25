@@ -434,38 +434,13 @@ final class PanelController: NSObject {
     func setup() {
         PanelController.shared = self
         transcriptionService.notesStorage = notesStorage
-        // Belt-and-suspenders "waiting on retry" tracking: subscribe to the
-        // queue's backoff stream so every scheduled retry flips the flag.
-        transcriptionService.startRetryObservation()
         transcriptionFloatingWidget.attach(transcription: transcriptionService)
-        transcriptionFloatingWidget.onOpenTranscription = { [weak self] in
-            guard let self else { return }
-            self.showPanel()
-        }
-        // "Open Notes" on the long-running notification: open the panel on the
-        // Notes tab with the Transcriptions filter applied.
-        transcriptionFloatingWidget.onOpenNotes = { [weak self] in
-            guard let self else { return }
-            AppSettings.shared.notesActiveFilter = .transcriptions
-            self.panelInteractionState.requestedTab = .notes
-            self.showPanel()
-        }
 
         // Auto-hide the panel when recording starts so the pill takes over.
         transcriptionService.$isRecording
             .filter { $0 }
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in self?.hidePanel() }
-            .store(in: &cancellables)
-
-        // Mirror the signed-in user's email into TranscriptionService so Slack
-        // error reports include it. Sets on login, clears on logout.
-        AuthService.shared.$currentUser
-            .map { $0?.email }
-            .receive(on: RunLoop.main)
-            .sink { [weak self] email in
-                self?.transcriptionService.userEmail = email
-            }
             .store(in: &cancellables)
 
         // Long (>= 5 min) meeting recordings are the only ones that fire
@@ -581,10 +556,9 @@ final class PanelController: NSObject {
     }
 
     private func updateCardsVsPanelHostingVisibility() {
-        let showAuthGate = !AuthService.shared.isSignedIn
-        let cards = isCardsLayout && !showAuthGate
+        let cards = isCardsLayout
         panelHostingView?.isHidden = cards
-        cardsModeContainer?.isHidden = !cards || showAuthGate
+        cardsModeContainer?.isHidden = !cards
     }
 
     /// Recompute cards stack height and resize the panel (top fixed, grows downward only).
@@ -862,110 +836,6 @@ final class PanelController: NSObject {
     }
 }
 
-// MARK: - Root SwiftUI view (switches layout style)
-
-struct AuthGateView: View {
-    @ObservedObject private var auth = AuthService.shared
-    @State private var isHoveringCTA = false
-
-    var body: some View {
-        ZStack {
-            Color.black.ignoresSafeArea()
-
-            VStack(spacing: 36) {
-
-                // MARK: Top — logo + headline
-                VStack(spacing: 20) {
-
-                    StashLogoView()
-                        .frame(width: 48, height: 48)
-
-                    (
-                        Text("everything you copy, note, and record. ")
-                            .foregroundColor(Color.white.opacity(0.40))
-                        +
-                        Text("always at hand.")
-                            .foregroundColor(.white)
-                    )
-                    .font(.custom("Inter-SemiBold", size: 20))
-                    .multilineTextAlignment(.center)
-                    .textCase(.lowercase)
-                    .lineSpacing(4)
-                    .frame(width: 338)
-                }
-
-                // MARK: Bottom — Google button
-                VStack(spacing: 0) {
-                    Button {
-                        Task { await AuthService.shared.signInWithGoogle() }
-                    } label: {
-                        HStack(spacing: 16) {
-                            GoogleGIcon()
-                                .frame(width: 18, height: 18)
-                            Text("Continue with Google")
-                                .font(.custom("Inter-Regular", size: 14))
-                                .foregroundColor(Color(red: 0.04, green: 0.04, blue: 0.04))
-                        }
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 48)
-                        .background(isHoveringCTA ? Color(white: 0.88) : Color.white)
-                        .clipShape(Capsule())
-                        .animation(.easeInOut(duration: 0.15), value: isHoveringCTA)
-                    }
-                    .buttonStyle(.plain)
-                    .onHover { isHoveringCTA = $0 }
-                    .frame(maxWidth: 500)
-                    // Intentionally NOT disabled while isLoading: standard pattern
-                    // (VS Code, Linear, Slack, Notion) keeps the OAuth CTA clickable
-                    // throughout. If the user closes the browser tab without signing
-                    // in, clicking again starts a fresh PKCE challenge — Supabase
-                    // silently invalidates the prior code_verifier server-side, so
-                    // there's no race. Disabling the button is what creates the
-                    // dead-end recoverable only by quitting the app.
-
-                    if let error = auth.errorMessage {
-                        Text(error)
-                            .font(.system(size: 12))
-                            .foregroundColor(Color.orange.opacity(0.85))
-                            .multilineTextAlignment(.center)
-                            .frame(width: 300)
-                            .padding(.top, 12)
-                            .onTapGesture { AuthService.shared.errorMessage = nil }
-                    } else if auth.isLoading {
-                        Text("Waiting for browser to complete sign-in…")
-                            .font(.system(size: 12))
-                            .foregroundColor(.white.opacity(0.55))
-                            .multilineTextAlignment(.center)
-                            .frame(width: 300)
-                            .padding(.top, 12)
-                    }
-                }
-            }
-            .padding(20)
-        }
-    }
-}
-
-// MARK: - Stash logo (exact SVG paths — do not modify structure)
-
-private struct StashLogoView: View {
-    var body: some View {
-        Image("logo")
-            .resizable()
-            .scaledToFit()
-    }
-}
-
-// MARK: - Google G icon (official four-colour)
-
-private struct GoogleGIcon: View {
-    var body: some View {
-        Image("Social Icons")
-            .resizable()
-            .scaledToFit()
-    }
-}
-
 // MARK: - NSBezierPath SVG parser (M, L, C, Z — sufficient for Stash logo paths)
 
 private extension NSBezierPath {
@@ -1018,6 +888,8 @@ private extension NSBezierPath {
     }
 }
 
+// MARK: - Root SwiftUI view (switches layout style)
+
 struct QuickPanelRootView: View {
     var makePanelKey: () -> Void
     @ObservedObject var fileDropStorage: FileDropStorage
@@ -1030,14 +902,8 @@ struct QuickPanelRootView: View {
     @ObservedObject var fileQuickLook: FileQuickLookController
 
     @ObservedObject private var settings = AppSettings.shared
-    @ObservedObject private var auth = AuthService.shared
 
     var body: some View {
-        if !auth.isSignedIn {
-            AuthGateView()
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .preferredColorScheme(.dark)
-        } else {
         Group {
             if settings.layoutStyle == .panel {
                 PanelContentView(
@@ -1075,7 +941,6 @@ struct QuickPanelRootView: View {
             }
         }
         .id(settings.layoutStyle)
-        } // end auth else
     }
 }
 

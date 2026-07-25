@@ -28,23 +28,6 @@ enum DesignTokens {
         static let activeForeground = Color(red: 0.88, green: 0.94, blue: 1.0)
     }
 
-    /// Bottom-center status notification (long-running transcription block).
-    enum Notification {
-        /// Near-black capsule background.
-        static let background  = Color(red: 0.10, green: 0.10, blue: 0.11)
-        /// Warning triangle tint (amber).
-        static let warningIcon = Color(red: 0.98, green: 0.74, blue: 0.18)
-        /// Primary button — light fill, dark label.
-        static let primaryButtonFill  = Color.white.opacity(0.92)
-        static let primaryButtonLabel = Color(red: 0.10, green: 0.10, blue: 0.11)
-        /// Secondary button — transparent fill, hairline outline, light label.
-        static let secondaryButtonOutline = Color.white.opacity(0.18)
-        static let secondaryButtonLabel   = Color.white.opacity(0.85)
-        /// Title / body text.
-        static let titleColor = Color.white
-        static let bodyColor  = Color.white.opacity(0.70)
-    }
-
     enum Spacing {
         static let panel: CGFloat = 20        // outer panel padding
         static let sectionGap: CGFloat = 20   // gap between sections
@@ -64,39 +47,105 @@ enum DesignTokens {
     /// Floating transcription pill (redesign 2026-04-21). Fixed dimensions so Recording,
     /// Processing and Copied states share identical width/height per Figma node 280-981.
     enum Pill {
-        // Asymmetric inner spacing. Layout (LTR):
-        //   [4pt lead pad][24 iconDisc][6 icon→timer][label][11 timer→dot][10 dot][8pt trail pad]
-        // Per design feedback: icon→timer slightly tighter (-2pt) than the
-        // base contentSpacing, timer→dot slightly looser (+3pt) so the
-        // pill doesn't read as cramped on the right. Trailing padding +4
-        // gives the dot more breathing room from the pill's right edge.
-        //
-        // Pill width is now computed dynamically per displayed mode by the
-        // controller's sizeForCurrentMode (using NSString.size on the label
-        // text), so each state — recording timer, "Failed", "No audio",
-        // "Pasted ✓", "Note saved", "Network timeout" — gets exactly the width
-        // it needs. This `width` constant is the FALLBACK used by
-        // restorePosition during the panel's initial buildPanel call,
-        // before any mode is set; kept at the typical recording size so
-        // first-show slide+fade lands at a sensible target.
-        static let width: CGFloat = 105
+        // Layout (LTR), notch displays:
+        //   [flare][12 lead pad][label][4 inset][ NOTCH ][4 inset][meter][14 trail pad][flare]
+        // Width is computed per mode by the controller's sizeForCurrentMode;
+        // height is derived from the label's font metrics plus labelBottomGap.
         static let height: CGFloat = 32
-        static let iconDiscSize: CGFloat = 24
         static let iconGlyphSize: CGFloat = 14
+        /// Load-bearing: the slab's height is derived from this font's metrics,
+        /// so the SwiftUI label and the controller's NSFont measurement must
+        /// use the same size.
+        static let labelFontSize: CGFloat = 14
         // Asymmetric outer padding — more on the right.
-        static let leadingPadding: CGFloat = 4
-        static let trailingPadding: CGFloat = 8
+        static let leadingPadding: CGFloat = 12
+        static let trailingPadding: CGFloat = 14
         static let verticalPadding: CGFloat = 4
-        // Inner spacings — used as label's left/right padding inside the
-        // HStack(spacing: 0). Splitting them lets the iconDisc→timer and
-        // timer→dot gaps differ.
-        static let iconToTimerSpacing: CGFloat = 6
-        static let timerToDotSpacing: CGFloat = 11
-        // Legacy generic content spacing — retained for any caller still
-        // referring to it; new code uses iconToTimer/timerToDot.
-        static let contentSpacing: CGFloat = 8
-        static let recordingDotSize: CGFloat = 10
-        static let stopTapTargetSize: CGFloat = 10
+        /// Gap between label and indicator on a display with no notch, where
+        /// there is no notch span to reserve.
+        static let compactContentGap: CGFloat = 11
+
+        // MARK: Notch-anchored presentation (Dynamic-Island style)
+        //
+        // The pill hangs flush from the display's physical top edge and is
+        // only as tall as the notch, so its content sits AT menu-bar level.
+        // The notch (~185pt on a 14" MBP) is far wider than the pill's
+        // content, so the label and the mode indicator are pushed to
+        // opposite ends and the notch span is left clear between them —
+        // otherwise content centered on the notch would be hidden behind it.
+        static let notchBottomCornerRadius: CGFloat = 20
+
+        /// Concave flare at the two TOP corners. The slab's top edge runs the
+        /// full panel width and the body pulls in by this much just below it,
+        /// joined by a curve that bows inward — so the slab appears to splay
+        /// outward where it meets the screen edge instead of ending square.
+        static let notchTopFlareRadius: CGFloat = 9
+
+        // Clear space either side of the notch, between it and the content
+        // sitting in the menu-bar strips left and right of it.
+        static let notchContentInset: CGFloat = 4
+
+        /// Gap between the BOTTOM of the label's line box and the slab's
+        /// bottom edge. The slab's height is derived from this plus the
+        /// measured label metrics, rather than the other way round, so the
+        /// gap stays exact if the label font ever changes.
+        static let labelBottomGap: CGFloat = 8
+
+        // Entrance / exit motion.
+        //
+        // Short travel: the slab lifts only a few points out of the notch
+        // rather than dropping in from well above it. Curves are plain
+        // decelerating eases — an earlier entrance used a control point above
+        // 1, which overshoots early in the timing curve and read as a stutter
+        // rather than as a spring.
+        static let entranceSlideOffset: CGFloat = 5
+        static let entranceDuration: CFTimeInterval = 0.30
+        static let entranceCurveCP1x: Double = 0.22
+        static let entranceCurveCP1y: Double = 1.0
+        static let entranceCurveCP2x: Double = 0.36
+        static let entranceCurveCP2y: Double = 1.0
+
+        static let exitSlideOffset: CGFloat = 4
+        static let exitDuration: CFTimeInterval = 0.20
+        static let exitCurveCP1x: Double = 0.40
+        static let exitCurveCP1y: Double = 0.0
+        static let exitCurveCP2x: Double = 0.70
+        static let exitCurveCP2y: Double = 1.0
+
+        // MARK: Recording glow
+        //
+        // A soft, heavily-blurred warm glow along the BOTTOM edge of the
+        // slab while recording. Deliberately NOT a full border stroke (a
+        // crisp outline read as harsh) and NOT a sliding highlight (lateral
+        // motion read as busy) — it sits in place and breathes vertically.
+        //
+        // The breathe is a slow sine on wall-clock time. The live audio
+        // level modulates opacity on top of it, which reacts smoothly.
+        // `glowLevelSmoothing` bridges the level meter's 10 Hz ticks so the
+        // glow breathes rather than stepping.
+        static let glowBandHeight: CGFloat = 18
+        static let glowBlurRadius: CGFloat = 10
+        /// Seconds for one full breathe (dim → bright → dim).
+        static let glowPulsePeriod: TimeInterval = 2.6
+        /// Band height at the dimmest point of the breathe, as a fraction of
+        /// `glowBandHeight`. Keeps the glow present rather than blinking out.
+        static let glowPulseMinScale: CGFloat = 0.62
+        static let glowBaseOpacity: Double = 0.65
+        static let glowLevelOpacityBoost: Double = 0.40
+        static let glowLevelSmoothing: TimeInterval = 0.12
+        // "Sexy Blue" ramp — #007BFF → #B0E0E6, with two interpolated stops
+        // between so the bloom reads as a gradient rather than two flat ends.
+        static let glowColorA = Color(red: 0.000, green: 0.482, blue: 1.000)  // #007BFF
+        static let glowColorB = Color(red: 0.231, green: 0.584, blue: 0.980)  // #3B95FA
+        static let glowColorC = Color(red: 0.463, green: 0.686, blue: 0.957)  // #76AFF4
+        static let glowColorD = Color(red: 0.690, green: 0.878, blue: 0.902)  // #B0E0E6
+
+        // MARK: Recording level meter (right of the notch)
+        static let levelMeterBarCount: Int = 4
+        static let levelMeterBarWidth: CGFloat = 2.5
+        static let levelMeterBarSpacing: CGFloat = 2.5
+        static let levelMeterMinBarHeight: CGFloat = 3
+        static let levelMeterMaxBarHeight: CGFloat = 14
 
         // Panel-frame animation — cubic-bezier(0.22, 1, 0.36, 1) over 400ms.
         // Used by the drag-to-snap reposition. Tuned to read as a deliberate
@@ -120,9 +169,14 @@ enum DesignTokens {
         // the NEW content fades in (`contentInsertionDuration`) after a
         // small delay (`contentInsertionDelay`) so the rounded corners
         // reach their target shape before text appears.
-        static let contentRemovalDuration: TimeInterval = 0.08
-        static let contentInsertionDelay: TimeInterval = 0.16
-        static let contentInsertionDuration: TimeInterval = 0.16
+        // Label swaps (Listening… → Processing) cross-fade with a slight
+        // blur + scale, both directions running together over the same
+        // duration. Symmetric on purpose: the earlier fade-out-then-pause-
+        // then-fade-in left frames with nothing on screen, which read as the
+        // pill blacking out mid-transition.
+        static let contentTransitionDuration: TimeInterval = 0.26
+        static let contentTransitionBlur: CGFloat = 4
+        static let contentTransitionScale: CGFloat = 0.92
 
         // Completion hold durations — how long the pill displays a completion
         // message before hiding (or returning to recording for mid-recording
@@ -180,86 +234,6 @@ enum DesignTokens {
         static let openSlideOffset: CGFloat = 10
         /// Panel ends 8 pt above its start y on close.
         static let closeSlideOffset: CGFloat = 8
-    }
-
-    enum Onboarding {
-        // Window — rounded, transparent, OS drop shadow.
-        static let windowSize = NSSize(width: 720, height: 560)
-        static let windowCornerRadius: CGFloat = 16
-        static let background = Color.black
-        static let foreground = Color.white
-
-        // Spacing
-        static let outerPadding: CGFloat = 56
-        static let stepGap: CGFloat = 24
-        static let chipGap: CGFloat = 12
-        static let hotkeyRowGap: CGFloat = 14
-        static let hotkeyLabelWidth: CGFloat = 140
-        static let bodyMaxWidthShort: CGFloat = 420
-        static let bodyMaxWidthLong: CGFloat = 460
-        static let progressDotSize: CGFloat = 6
-        static let progressDotGap: CGFloat = 8
-
-        // Hotkey chip
-        static let chipPaddingH: CGFloat = 14
-        static let chipPaddingV: CGFloat = 8
-        static let chipCornerRadius: CGFloat = 10
-        static let chipFont = Font.system(size: 17, weight: .medium, design: .rounded)
-        static let chipBackground = Color.white.opacity(0.08)
-        static let chipBorder = Color.white.opacity(0.16)
-
-        // CTA button
-        static let ctaPaddingH: CGFloat = 22
-        static let ctaPaddingV: CGFloat = 12
-        static let ctaCornerRadius: CGFloat = 12
-        static let ctaFont = Font.system(size: 14, weight: .semibold)
-        static let ctaBackgroundRest = Color.white.opacity(0.10)
-        static let ctaBackgroundHover = Color.white.opacity(0.16)
-
-        // Typography
-        static let titleFont = Font.system(size: 28, weight: .semibold)
-        static let bodyFont  = Font.system(size: 15, weight: .regular)
-        static let bodyColor = Color.white.opacity(0.78)
-
-        // Entrance animation — mirrors docs/auth/success.html
-        static let entranceDuration: Double = 0.7
-        static let entranceTranslate: CGFloat = 12
-        static let entranceStaggerSeconds: Double = 0.15
-        static let entranceCurve: Animation = .easeOut(duration: 0.7)
-
-        // Media slot — fixed 16:9 placeholder for demo videos
-        static let mediaSlotWidth: CGFloat = 480
-        static let mediaSlotHeight: CGFloat = 270
-        static let mediaSlotCornerRadius: CGFloat = 12
-        static let mediaSlotBackground = Color.white.opacity(0.04)
-        static let mediaSlotBorder = Color.white.opacity(0.08)
-
-        // Recording step — bullet rows
-        static let recordingBulletGap: CGFloat = 10
-        static let recordingBulletInline: CGFloat = 6
-
-        // Auth screen (screen 1) — full-bleed background with welcome card
-        static let authIconSize: CGFloat = 64
-        static let authContentTopPadding: CGFloat = 56
-        static let authContentSpacing: CGFloat = 18
-        static let authTitleSubtitleGap: CGFloat = 10
-        static let authButtonTopGap: CGFloat = 32
-        static let authButtonHeight: CGFloat = 56
-        static let authButtonMaxWidth: CGFloat = 480
-        static let authContentHorizontalPadding: CGFloat = 64
-        static let authTitleFont = Font.custom("Inter-SemiBold", size: 32)
-        static let authSubtitleFont = Font.custom("Inter-Regular", size: 18)
-        static let authButtonFont = Font.custom("Inter-SemiBold", size: 16)
-        static let authTitleColor = Color.black
-        static let authSubtitleColor = Color.black.opacity(0.55)
-        static let authButtonRest = Color.white
-        static let authButtonHover = Color(white: 0.94)
-        static let authStatusColor = Color.black.opacity(0.55)
-
-        // Asset name for the full-bleed background image. Drop a matching
-        // image set into Assets.xcassets to enable; until then the auth
-        // screen renders a sky→grass gradient placeholder.
-        static let authBackgroundAssetName = "OnboardingAuthBackground"
     }
 
     enum FileShelf {

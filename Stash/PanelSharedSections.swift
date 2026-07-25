@@ -579,20 +579,25 @@ struct SharedNotesColumn: View {
 
         return ZStack(alignment: .topTrailing) {
             VStack(alignment: .leading, spacing: 0) {
-                // Sticky filter bar — pinned above the scrollable list.
-                NotesFilterBar(
-                    activeFilter: $appSettings.notesActiveFilter,
-                    counts: filterCounts,
-                    pendingCount: pendingCount,
-                    onRetryAllTap: {
-                        // userRequestedDrain (vs drainNow) so exhausted sessions
-                        // — attemptCount past the auto-retry budget — get their
-                        // counter reset and become eligible again.
-                        Task {
-                            await TranscriptionRetryQueue.shared.userRequestedDrain()
+                // Sticky filter bar — pinned above the scrollable list. Hidden
+                // when there are no notes so the empty Notes tab matches the
+                // other three tabs: a full-panel centered PanelEmptyState with
+                // no header/filter row above it.
+                if !notesStorage.notes.isEmpty {
+                    NotesFilterBar(
+                        activeFilter: $appSettings.notesActiveFilter,
+                        counts: filterCounts,
+                        pendingCount: pendingCount,
+                        onRetryAllTap: {
+                            // userRequestedDrain (vs drainNow) so exhausted sessions
+                            // — attemptCount past the auto-retry budget — get their
+                            // counter reset and become eligible again.
+                            Task {
+                                await TranscriptionRetryQueue.shared.userRequestedDrain()
+                            }
                         }
-                    }
-                )
+                    )
+                }
 
                 // List, empty-state, or filter-empty-state.
                 // No top gap: content butts directly against the filter-bar
@@ -1032,10 +1037,24 @@ struct AllCombinedView: View {
 
     var body: some View {
         let isEmpty = pinnedEntries.isEmpty && notesStorage.notes.isEmpty && fileDropStorage.files.isEmpty
-        return scrollContent(isEmpty: isEmpty)
+        return Group {
+            if isEmpty {
+                // Rendered OUTSIDE the ScrollView so `maxHeight: .infinity` can
+                // actually expand and vertically center the message — matching
+                // the Clipboard/Notes/Files tabs. Inside the scroll view the
+                // VStack hugs its content, which pinned this to the top.
+                PanelEmptyState(
+                    title: "Nothing here yet",
+                    subtitle: "Copy text, drop a file, or transcribe your next meeting"
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                scrollContent()
+            }
+        }
     }
 
-    private func scrollContent(isEmpty: Bool) -> some View {
+    private func scrollContent() -> some View {
         ScrollView(.vertical, showsIndicators: false) {
             VStack(alignment: .leading, spacing: 20) {
 
@@ -1142,15 +1161,6 @@ struct AllCombinedView: View {
                             }
                         }
                     }
-                }
-
-                if isEmpty {
-                    PanelEmptyState(
-                        title: "Nothing here yet",
-                        subtitle: "Copy text, drop a file, or transcribe your next meeting"
-                    )
-                    .frame(maxWidth: .infinity)
-                    .padding(.top, 80)
                 }
             }
         }

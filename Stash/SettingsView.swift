@@ -58,7 +58,6 @@ enum HotkeyRecordingMode {
 
 /// Manages key-event monitoring during hotkey recording.
 /// Takes a save callback so the same class can record for any hotkey slot.
-/// Internal access (was `private`) — reused by OnboardingView's hotkey screen.
 final class HotkeyRecorder: ObservableObject {
     @Published var isRecording = false
 
@@ -160,12 +159,11 @@ final class HotkeyRecorder: ObservableObject {
     }
 }
 
-// MARK: - Hotkey recorder row (shared by SettingsView and OnboardingView)
+// MARK: - Hotkey recorder row
 
 /// Self-contained hotkey row: badge + Record/Cancel control. Owns its own
 /// `HotkeyRecorder` and persists writes to AppSettings + posts the right
-/// notifications based on the configured `slot`. Single source of truth so
-/// onboarding inherits Settings' double-tap rendering for free.
+/// notifications based on the configured `slot`.
 struct HotkeyRecorderRow: View {
     let label: String
     let slot: HotkeySlot
@@ -276,14 +274,11 @@ struct HotkeyRecorderRow: View {
 
 struct SettingsView: View {
     @ObservedObject private var settings = AppSettings.shared
-    @ObservedObject private var auth     = AuthService.shared
 
     // Data section alert state
     @State private var showClearClipboardAlert = false
     @State private var showClearNotesAlert     = false
     @State private var showClearFilesAlert     = false
-
-    @State private var isHoveringSignOut = false
 
     // Permission status. Refreshed on appear and when the app becomes active
     // (so toggling a permission in System Settings shows up when the user
@@ -298,7 +293,6 @@ struct SettingsView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
-                accountCard
                 hotkeySection
                 autoHideSection
                 permissionsSection
@@ -334,75 +328,6 @@ struct SettingsView: View {
     private func refreshPermissionStatus() {
         micGranted = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
         accessibilityGranted = AXIsProcessTrusted()
-    }
-
-    // MARK: - Account card
-
-    private var accountCard: some View {
-        HStack(spacing: 16) {
-            // Avatar — circular initials or placeholder
-            ZStack {
-                Circle()
-                    .fill(Color.white.opacity(0.15))
-                    .frame(width: 40, height: 40)
-                if auth.isSignedIn, let user = auth.currentUser {
-                    Text(String((user.name.isEmpty ? user.email : user.name).prefix(1)).uppercased())
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundColor(.white)
-                } else {
-                    Image(systemName: "person.fill")
-                        .font(.system(size: 16))
-                        .foregroundColor(.white.opacity(0.6))
-                }
-            }
-
-            // Name + email
-            VStack(alignment: .leading, spacing: 2) {
-                if auth.isSignedIn, let user = auth.currentUser {
-                    Text(user.name.isEmpty ? user.email : user.name)
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundColor(.white.opacity(0.85))
-                    Text(user.email)
-                        .font(.system(size: 13, weight: .regular))
-                        .foregroundColor(.white.opacity(0.45))
-                        .lineLimit(1)
-                } else {
-                    Text("Not signed in")
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundColor(.white.opacity(0.85))
-                }
-            }
-
-            Spacer()
-
-            // Sign out / Sign in button
-            if auth.isSignedIn {
-                Button {
-                    Task { await AuthService.shared.signOut() }
-                } label: {
-                    LogOutIcon(color: Color(red: 1, green: 0.27, blue: 0.23), size: 16)
-                        .frame(width: 32, height: 32)
-                }
-                .buttonStyle(HoverButtonStyle(hoverOpacity: 0.09))
-            } else {
-                Button {
-                    Task { await AuthService.shared.signInWithGoogle() }
-                } label: {
-                    Text("Sign in")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundColor(.white.opacity(0.75))
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
-                        .background(Color.white.opacity(0.12))
-                        .cornerRadius(8)
-                }
-                .buttonStyle(HoverButtonStyle(hoverOpacity: 0.12))
-            }
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 12)
-        .background(Color.white.opacity(0.07))
-        .cornerRadius(12)
     }
 
     // MARK: - Hotkeys section
@@ -719,49 +644,6 @@ private struct PulsingDot: View {
             .opacity(pulse ? 0.5 : 1.0)
             .animation(.easeInOut(duration: 0.6).repeatForever(autoreverses: true), value: pulse)
             .onAppear { pulse = true }
-    }
-}
-
-private struct LogOutIcon: View {
-    var color: Color = .primary
-    var size: CGFloat = 16
-
-    var body: some View {
-        Canvas { ctx, _ in
-            let s = size / 24
-            let stroke = StrokeStyle(lineWidth: 2*s, lineCap: .round, lineJoin: .round)
-
-            // Arrow head: m16 17 5-5-5-5
-            var p1 = Path()
-            p1.move(to:    CGPoint(x: 16*s, y: 17*s))
-            p1.addLine(to: CGPoint(x: 21*s, y: 12*s))
-            p1.addLine(to: CGPoint(x: 16*s, y:  7*s))
-            ctx.stroke(p1, with: .foreground, style: stroke)
-
-            // Arrow shaft: M21 12H9
-            var p2 = Path()
-            p2.move(to:    CGPoint(x: 21*s, y: 12*s))
-            p2.addLine(to: CGPoint(x:  9*s, y: 12*s))
-            ctx.stroke(p2, with: .foreground, style: stroke)
-
-            // Door bracket: M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4
-            // addArc(tangent1End:tangent2End:radius:) rounds the corner at
-            // tangent1End — matches SVG arc-by-tangent semantics exactly.
-            let cg = CGMutablePath()
-            cg.move(to:    CGPoint(x:  9*s, y: 21*s))
-            cg.addLine(to: CGPoint(x:  5*s, y: 21*s))
-            cg.addArc(tangent1End: CGPoint(x: 3*s, y: 21*s),
-                      tangent2End: CGPoint(x: 3*s, y: 19*s),
-                      radius: 2*s)
-            cg.addLine(to: CGPoint(x:  3*s, y:  5*s))
-            cg.addArc(tangent1End: CGPoint(x: 3*s, y:  3*s),
-                      tangent2End: CGPoint(x: 5*s, y:  3*s),
-                      radius: 2*s)
-            cg.addLine(to: CGPoint(x:  9*s, y:  3*s))
-            ctx.stroke(Path(cg), with: .foreground, style: stroke)
-        }
-        .foregroundColor(color)
-        .frame(width: size, height: size)
     }
 }
 

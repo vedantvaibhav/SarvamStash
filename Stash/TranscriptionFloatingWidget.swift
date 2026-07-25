@@ -4,25 +4,92 @@ import SwiftUI
 
 // MARK: - Pill mode
 
-enum PillMode: Equatable {
-    case recording(durationSeconds: Int)
+enum PillMode: Hashable {
+    case recording
     case processing
     case completion(message: String)
 }
 
-/// Stable animation key: identical across timer ticks so the HStack doesn't
-/// cross-fade every second while recording.
-private enum PillPhaseKey: Equatable {
-    case recording
-    case processing
-    case completion(String)
+private extension NSScreen {
+    /// Stable per-display identifier, used to key cached notch geometry.
+    var displayID: CGDirectDisplayID {
+        (deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID) ?? 0
+    }
+}
 
-    init(_ mode: PillMode) {
-        switch mode {
-        case .recording:            self = .recording
-        case .processing:           self = .processing
-        case .completion(let msg):  self = .completion(msg)
-        }
+// MARK: - Notch slab shape
+
+/// Flat top edge (flush with the screen edge the pill emerges from) and
+/// rounded bottom corners.
+///
+/// `UnevenRoundedRectangle(topLeadingRadius: 0, topTrailingRadius: 0, ...)`
+/// expresses this directly but is macOS 14+; this project deploys to
+/// macOS 13, so the path is built by hand instead of gating the whole pill
+/// behind an availability check.
+/// `InsettableShape` as well as `Shape` so the recording border can use
+/// `.strokeBorder`, which draws the stroke entirely INSIDE the bounds. A
+/// plain `.stroke` centers on the path, which would put half the line
+/// outside the panel — clipped away at the sides and off-screen at the
+/// flush top edge.
+struct NotchPillShape: Shape, InsettableShape {
+    var bottomRadius: CGFloat
+    /// Concave flare at the two top corners. 0 gives square top corners.
+    var topFlareRadius: CGFloat = 0
+    var inset: CGFloat = 0
+
+    func inset(by amount: CGFloat) -> some InsettableShape {
+        var copy = self
+        copy.inset += amount
+        return copy
+    }
+
+    func path(in bounds: CGRect) -> Path {
+        let rect = bounds.insetBy(dx: inset, dy: inset)
+        guard rect.width > 0, rect.height > 0 else { return Path() }
+
+        // Flare pulls the body in from each side, so it can never eat more
+        // than half the width; the bottom radius is then clamped against
+        // whatever body width is left.
+        let flare = max(0, min(topFlareRadius, min(rect.width / 2, rect.height)))
+        let bodyLeft = rect.minX + flare
+        let bodyRight = rect.maxX - flare
+        let corner = max(0, min(bottomRadius, min((bodyRight - bodyLeft) / 2, rect.height - flare)))
+
+        var path = Path()
+        // Top edge spans the FULL width — flush with the screen edge.
+        path.move(to: CGPoint(x: rect.minX, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.minY))
+        // Top-right concave flare. The control point sits at the body's own
+        // top-right, which bows the curve inward and carves the corner out
+        // rather than rounding it off.
+        path.addQuadCurve(
+            to: CGPoint(x: bodyRight, y: rect.minY + flare),
+            control: CGPoint(x: bodyRight, y: rect.minY)
+        )
+        path.addLine(to: CGPoint(x: bodyRight, y: rect.maxY - corner))
+        path.addArc(
+            center: CGPoint(x: bodyRight - corner, y: rect.maxY - corner),
+            radius: corner,
+            startAngle: .degrees(0),
+            endAngle: .degrees(90),
+            clockwise: false
+        )
+        path.addLine(to: CGPoint(x: bodyLeft + corner, y: rect.maxY))
+        path.addArc(
+            center: CGPoint(x: bodyLeft + corner, y: rect.maxY - corner),
+            radius: corner,
+            startAngle: .degrees(90),
+            endAngle: .degrees(180),
+            clockwise: false
+        )
+        path.addLine(to: CGPoint(x: bodyLeft, y: rect.minY + flare))
+        // Top-left concave flare, mirrored.
+        path.addQuadCurve(
+            to: CGPoint(x: rect.minX, y: rect.minY),
+            control: CGPoint(x: bodyLeft, y: rect.minY)
+        )
+        path.closeSubpath()
+        return path
     }
 }
 
@@ -31,100 +98,217 @@ private enum PillPhaseKey: Equatable {
 struct TranscriptionPillView: View {
     let mode: PillMode
     let onStop: () -> Void
+    /// Live mic level, 0...1, published by TranscriptionService's level-meter
+    /// timer. Drives the recording border's intensity. Ignored outside
+    /// `.recording`.
+    var audioLevel: Float = 0
+    /// Width of the physical notch. The label and the trailing indicator are
+    /// pushed to opposite ends of the slab with at least this much clear
+    /// space between them, so content lands in the menu-bar strips either
+    /// side of the notch rather than behind it. 0 on un-notched displays,
+    /// where the layout collapses to an ordinary compact pill.
+    var notchGapWidth: CGFloat = 0
+    /// Distance from the slab's left edge to where the notch begins, in the
+    /// slab's own coordinates. Lets the glow skip the span the notch covers.
+    var notchLeadingOffset: CGFloat = 0
 
     var body: some View {
-        Group {
-            if case .processing = mode {
-                // Compact circle: just the icon disc + spinner. AppKit
-                // panel resizes to 32×32 around it.
-                iconDisc
-                    .frame(
-                        width: DesignTokens.Pill.height,
-                        height: DesignTokens.Pill.height
-                    )
-                    .transition(asymmetricContentTransition)
-            } else {
-                // Full pill with asymmetric spacing: icon→timer is tighter
-                // than timer→dot. HStack uses spacing: 0 and the gaps come
-                // from the label's leading/trailing padding. In completion
-                // mode (trailing is EmptyView), the label's trailing padding
-                // becomes extra right-side breathing room for the message
-                // text. Pill auto-sizes to content via the controller's
-                // dynamic sizeForCurrentMode (using NSString.size on the
-                // label text), so any state — recording, "No audio",
-                // "Failed", "Note saved" — gets just enough pillWidth to
-                // fit, with no leftover slack.
-                HStack(spacing: 0) {
-                    iconDisc
-                    label
-                        .padding(.leading, DesignTokens.Pill.iconToTimerSpacing)
-                        .padding(.trailing, DesignTokens.Pill.timerToDotSpacing)
-                    trailing
-                }
-                .padding(.leading, DesignTokens.Pill.leadingPadding)
-                .padding(.trailing, DesignTokens.Pill.trailingPadding)
-                .padding(.vertical, DesignTokens.Pill.verticalPadding)
-                .transition(asymmetricContentTransition)
-            }
+        // Label pinned left, mode indicator pinned right, notch-sized gap
+        // between them. Content sits AT menu-bar level beside the notch —
+        // never behind it. There is no icon disc: the indicator on the right
+        // carries the mode.
+        //
+        // `.id(mode)` gives each phase its own identity so a
+        // mode change is an insert+remove and `contentCrossFade` fires. The
+        // key ignores the recording timer's associated value, so identity
+        // stays stable second-to-second while recording.
+        HStack(spacing: 0) {
+            label
+            Spacer(minLength: notchGapWidth)
+            trailing
         }
-        // Mode-aware alignment: processing centers the icon in its 32×32
-        // circle; everything else leading-aligns so message text and icons
-        // stick to the left edge rather than centering inside the pill.
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: alignmentForMode)
-        .background(Color.black, in: Capsule())
-        // Clip to the capsule so content can't overflow the rounded ends
+        .padding(.leading, DesignTokens.Pill.leadingPadding)
+        .padding(.trailing, DesignTokens.Pill.trailingPadding)
+        // The flare pulls the body in from both sides; inset the content by
+        // the same amount so it sits inside the body, not under the flare.
+        .padding(.horizontal, DesignTokens.Pill.notchTopFlareRadius)
+        .padding(.vertical, DesignTokens.Pill.verticalPadding)
+        .transition(contentCrossFade)
+        .id(mode)
+        // The content row is exactly the notch's height and is pinned to the
+        // TOP of the slab, so the label stays at menu-bar level, level with
+        // the notch. Any extra slab height therefore lands entirely BELOW the
+        // label as padding, instead of dragging the text down with it.
+        .frame(height: DesignTokens.Pill.height)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .background(Color.black, in: pillShape)
+        // Clip to the slab so content can't overflow the rounded corners
         // while the AppKit panel is mid-resize.
-        .clipShape(Capsule())
-        // Triggers the asymmetric .transition modifiers. The actual
-        // durations come from the per-transition .animation chains; this
-        // just opens the animation transaction.
-        .animation(.default, value: PillPhaseKey(mode))
+        .clipShape(pillShape)
+        .overlay(recordingGlow)
+        .animation(.easeInOut(duration: DesignTokens.Pill.contentTransitionDuration),
+                   value: mode)
     }
 
-    /// Old content fades out fast; new content fades in after a delay so the
-    /// AppKit panel-frame animation has time to morph the capsule's rounded
-    /// corners to their target before text appears inside.
-    private var asymmetricContentTransition: AnyTransition {
-        .asymmetric(
-            insertion: .opacity.animation(
-                .easeInOut(duration: DesignTokens.Pill.contentInsertionDuration)
-                    .delay(DesignTokens.Pill.contentInsertionDelay)
-            ),
-            removal: .opacity.animation(
-                .easeInOut(duration: DesignTokens.Pill.contentRemovalDuration)
-            )
+    /// Outgoing and incoming content run the SAME modifier in opposite
+    /// directions over the same duration, so they cross-fade through each
+    /// other — opacity, a slight blur, and a slight scale together. There is
+    /// never a frame with nothing on screen.
+    private var contentCrossFade: AnyTransition {
+        .modifier(
+            active: PillContentPhase(hidden: true),
+            identity: PillContentPhase(hidden: false)
         )
     }
 
-    /// Processing mode centers (the iconDisc sits in the middle of the
-    /// 32×32 circle); every other mode leading-aligns content to the
-    /// pill's left edge.
-    private var alignmentForMode: Alignment {
-        if case .processing = mode { return .center }
-        return .leading
+    /// The slab outline: flat top (flush with the screen edge) + rounded
+    /// bottom corners. Shared by the background fill and the clip so they
+    /// can never disagree mid-resize.
+    private var pillShape: NotchPillShape {
+        NotchPillShape(
+            bottomRadius: DesignTokens.Pill.notchBottomCornerRadius,
+            topFlareRadius: DesignTokens.Pill.notchTopFlareRadius
+        )
     }
 
-    // MARK: Icon disc (24×24 with 14pt inner glyph / spinner)
+    // MARK: Recording glow
+    //
+    // A soft, multi-coloured bloom hugging the BOTTOM edge only, shown ONLY
+    // while recording — the BorderBeam look adapted to a slab whose top edge
+    // is flush with the screen and therefore has no visible border. It stays
+    // put and breathes vertically; an earlier version slid a highlight
+    // left-to-right, which read as busy and distracting.
+    // `TimelineView(.animation)` re-evaluates every display frame so the
+    // breathe is driven by wall-clock time and stays smooth regardless of
+    // how often the audio level or the pill's mode updates.
 
-    private var iconDisc: some View {
-        ZStack {
-            Circle().fill(DesignTokens.Icon.backgroundRest)
-            iconGlyph
+    @ViewBuilder
+    private var recordingGlow: some View {
+        if case .recording = mode {
+            TimelineView(.animation) { timeline in
+                // Slow sine, 0...1. Constant period rather than audio-driven:
+                // phase is derived from absolute time, so varying the period
+                // would retroactively rewrite it and the glow would jump.
+                // Level drives opacity below instead.
+                let elapsed = timeline.date.timeIntervalSinceReferenceDate
+                let radians = elapsed * 2 * .pi / DesignTokens.Pill.glowPulsePeriod
+                let breathe = CGFloat((sin(radians) + 1) / 2)
+                let scale = DesignTokens.Pill.glowPulseMinScale
+                    + (1 - DesignTokens.Pill.glowPulseMinScale) * breathe
+
+                // The notch physically blanks the middle of the slab, so a
+                // single full-width band reads as a gradient chopped in half.
+                // Instead the glow is drawn as two independent segments in
+                // the strips either side of the notch, with the notch span
+                // left empty. Each segment carries the WHOLE palette across
+                // its own width, so both edges show a colour mix rather than
+                // each sampling one slice of a shared ramp.
+                if notchGapWidth > 0 {
+                    HStack(spacing: 0) {
+                        glowSegment(scale: scale, anchor: .leading)
+                            .frame(width: max(0, notchLeadingOffset))
+                        Color.clear
+                            .frame(width: notchGapWidth)
+                        glowSegment(scale: scale, anchor: .trailing)
+                    }
+                } else {
+                    glowSegment(scale: scale, anchor: nil)
+                }
+            }
+            .clipShape(pillShape)
+            // Louder input → brighter glow. Applied outside the TimelineView
+            // so the implicit animation can smooth the level meter's 10 Hz
+            // steps into continuous movement.
+            .opacity(
+                DesignTokens.Pill.glowBaseOpacity
+                    + Double(normalizedAudioLevel) * DesignTokens.Pill.glowLevelOpacityBoost
+            )
+            .animation(.easeOut(duration: DesignTokens.Pill.glowLevelSmoothing), value: audioLevel)
+            // Purely decorative — must never intercept the stop tap.
+            .allowsHitTesting(false)
         }
-        .frame(width: DesignTokens.Pill.iconDiscSize, height: DesignTokens.Pill.iconDiscSize)
     }
+
+    /// One bloom segment: the full violet → magenta → blue → teal ramp across
+    /// its own width, strongest at the bottom edge and fading upward, with
+    /// both ends softened so it doesn't butt hard against the notch or the
+    /// rounded corners.
+    private func glowSegment(scale: CGFloat, anchor: HorizontalEdge?) -> some View {
+        LinearGradient(
+            colors: [
+                DesignTokens.Pill.glowColorA,
+                DesignTokens.Pill.glowColorB,
+                DesignTokens.Pill.glowColorC,
+                DesignTokens.Pill.glowColorD
+            ],
+            startPoint: .leading,
+            endPoint: .trailing
+        )
+        .frame(height: DesignTokens.Pill.glowBandHeight * scale)
+        .mask(
+            LinearGradient(colors: [.clear, .white], startPoint: .top, endPoint: .bottom)
+        )
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+        // Weighted toward the slab's OUTER corner rather than centred in the
+        // strip: brightest at the far edge, falling away toward the notch, so
+        // the light gathers around the rounded corners.
+        .mask(
+            LinearGradient(
+                gradient: Gradient(stops: outerEdgeStops(for: anchor)),
+                startPoint: .leading,
+                endPoint: .trailing
+            )
+        )
+        .blur(radius: DesignTokens.Pill.glowBlurRadius)
+    }
+
+    /// Mask stops that bias a segment's brightness toward the outer corner.
+    private func outerEdgeStops(for anchor: HorizontalEdge?) -> [Gradient.Stop] {
+        switch anchor {
+        case .leading:   // left strip — bright at its left edge
+            return [
+                .init(color: .white, location: 0.0),
+                .init(color: .white, location: 0.30),
+                .init(color: .clear, location: 1.0)
+            ]
+        case .trailing:  // right strip — bright at its right edge
+            return [
+                .init(color: .clear, location: 0.0),
+                .init(color: .white, location: 0.70),
+                .init(color: .white, location: 1.0)
+            ]
+        case .none:      // un-notched fallback: soften both ends
+            return [
+                .init(color: .clear, location: 0.0),
+                .init(color: .white, location: 0.25),
+                .init(color: .white, location: 0.75),
+                .init(color: .clear, location: 1.0)
+            ]
+        }
+    }
+
+    /// `audioLevel` is already normalized 0...1 by TranscriptionService, but
+    /// clamp defensively so a stray value can't push opacity out of range.
+    private var normalizedAudioLevel: Float {
+        min(max(audioLevel, 0), 1)
+    }
+
+    // MARK: Mode indicator (right of the notch)
+    //
+    // Replaces the old 24×24 icon disc. The circular disc read as heavy
+    // against the notch, so the glyphs now sit bare in the right-hand
+    // menu-bar strip.
 
     @ViewBuilder
     private var iconGlyph: some View {
         switch mode {
         case .recording:
-            glyph("waveform")
+            RecordingLevelMeter(level: normalizedAudioLevel)
         case .processing:
             ProgressView()
                 .progressViewStyle(.circular)
                 .controlSize(.small)
                 .tint(DesignTokens.Icon.tintMuted)
-                .transition(.opacity)
         case .completion(let message):
             if isPastedCompletion(message) {
                 Image("PastedConfirm")
@@ -142,7 +326,6 @@ struct TranscriptionPillView: View {
                     // covers both old and new SwiftUI tint paths.
                     .foregroundColor(DesignTokens.Icon.tintMuted)
                     .tint(DesignTokens.Icon.tintMuted)
-                    .transition(.opacity)
             } else {
                 glyph(completionSymbol(for: message))
             }
@@ -160,7 +343,6 @@ struct TranscriptionPillView: View {
         Image(systemName: systemName)
             .font(.system(size: DesignTokens.Pill.iconGlyphSize, weight: .regular))
             .foregroundStyle(DesignTokens.Icon.tintMuted)
-            .transition(.opacity)
     }
 
     /// Mirrors the strings emitted by `TranscriptionService.showCompletion(_:)`.
@@ -183,38 +365,36 @@ struct TranscriptionPillView: View {
     @ViewBuilder
     private var label: some View {
         switch mode {
-        case .recording(let seconds):
-            pillLabel(formatPillDuration(seconds), tabularDigits: true)
+        case .recording:
+            // Static word rather than the MM:SS timer. The elapsed seconds
+            // still ride along on PillMode.recording for the controller's
+            // sizing/phase logic; they're just no longer surfaced here.
+            // Shimmer marks the in-progress states; completion messages are
+            // results and stay static.
+            pillLabel(Self.recordingLabelText).shimmer()
         case .processing:
-            // Unreachable: the outer body switch renders just the icon disc
-            // for .processing, so this branch never builds. Kept exhaustive
-            // for the compiler.
-            EmptyView()
+            pillLabel(Self.processingLabelText).shimmer()
         case .completion(let message):
             pillLabel(message)
         }
     }
 
-    /// `tabularDigits: true` keeps SF Pro but forces equal-width digits so the
-    /// timer doesn't jitter between seconds. `.fixedSize(horizontal:)` stops
-    /// the HStack from compressing the label into an ellipsis.
-    private func pillLabel(_ text: String, tabularDigits: Bool = false) -> some View {
-        let base = Font.system(size: 14, weight: .regular)
-        return Text(text)
-            .font(tabularDigits ? base.monospacedDigit() : base)
+    /// Pill copy. Kept as constants so the controller's width measurement
+    /// (`sizeForCurrentMode`) can size the slab against the exact same
+    /// strings the view renders — they must not drift apart.
+    static let recordingLabelText = "Listening…"
+    static let processingLabelText = "Processing"
+
+    // MARK: Trailing element
+
+    /// `.fixedSize(horizontal:)` stops the HStack from compressing the label
+    /// into an ellipsis.
+    private func pillLabel(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: DesignTokens.Pill.labelFontSize, weight: .regular))
             .foregroundStyle(DesignTokens.Typography.itemColor)
             .lineLimit(1)
             .fixedSize(horizontal: true, vertical: false)
-            // The pill body's `.animation(_:value: PillPhaseKey(mode))` opens
-            // an animated transaction every second of recording (PillMode's
-            // .recording associated value carries durationSeconds). Without
-            // this transaction wrap, the implicit Text content swap inside
-            // that transaction cross-fades — visible as a dissolve on the
-            // timer. Pin the timer label to no-animation; other call sites
-            // ("Processing", completion text) keep their default behavior.
-            .transaction { transaction in
-                if tabularDigits { transaction.animation = nil }
-            }
     }
 
     // MARK: Trailing element
@@ -223,45 +403,67 @@ struct TranscriptionPillView: View {
     private var trailing: some View {
         switch mode {
         case .recording:
-            StopRecordingButton(onStop: onStop)
-                .transition(.opacity.combined(with: .scale(scale: 0.85)))
+            // The live level meter doubles as the stop control — the pill no
+            // longer has room for a separate red dot beside it in the
+            // right-hand strip. Tap target and accessibility are unchanged.
+            iconGlyph
+                .contentShape(Rectangle())
+                .onTapGesture { onStop() }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Stop recording")
+                .accessibilityAddTraits(.isButton)
         case .processing, .completion:
-            EmptyView()
+            iconGlyph
         }
     }
 }
 
-/// Pill duration format. Default MM:SS (zero-padded minutes); only expand to
-/// H:MM:SS once a recording crosses one hour.
-fileprivate func formatPillDuration(_ seconds: Int) -> String {
-    let h = seconds / 3600
-    let m = (seconds % 3600) / 60
-    let s = seconds % 60
-    if h > 0 { return String(format: "%d:%02d:%02d", h, m, s) }
-    return String(format: "%02d:%02d", m, s)
+/// Drives the pill's content cross-fade: opacity + blur + scale, applied in
+/// both directions so outgoing and incoming content overlap.
+private struct PillContentPhase: ViewModifier {
+    let hidden: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .opacity(hidden ? 0 : 1)
+            .blur(radius: hidden ? DesignTokens.Pill.contentTransitionBlur : 0)
+            .scaleEffect(hidden ? DesignTokens.Pill.contentTransitionScale : 1)
+    }
 }
 
-// MARK: - Stop button (10×10 solid red dot, tap = visible)
+// MARK: - Recording level meter
 //
-// Tap target = visible dot. The earlier 18pt invisible-tap-area produced an
-// asymmetric label→dot gap (the tap area's invisible left side ate into the
-// gap), making the pill look unbalanced relative to the iconDisc→label gap.
+// Compact bar meter driven by the live mic level. Bar weights are fixed so
+// the shape reads as a meter rather than noise; the level scales them.
 
-private struct StopRecordingButton: View {
-    let onStop: () -> Void
+private struct RecordingLevelMeter: View {
+    let level: Float
+
+    /// Per-bar response weights — the middle bars react hardest, which is
+    /// what makes the group read as a level meter rather than a bar chart.
+    private static let weights: [CGFloat] = [0.55, 1.0, 0.8, 0.45]
 
     var body: some View {
-        Circle()
-            .fill(DesignTokens.Icon.tintRecording)
-            .frame(
-                width: DesignTokens.Pill.recordingDotSize,
-                height: DesignTokens.Pill.recordingDotSize
-            )
-            .contentShape(Rectangle())
-            .onTapGesture { onStop() }
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel("Stop recording")
-            .accessibilityAddTraits(.isButton)
+        HStack(alignment: .center, spacing: DesignTokens.Pill.levelMeterBarSpacing) {
+            ForEach(0..<DesignTokens.Pill.levelMeterBarCount, id: \.self) { index in
+                Capsule()
+                    .fill(DesignTokens.Icon.tintMuted)
+                    .frame(
+                        width: DesignTokens.Pill.levelMeterBarWidth,
+                        height: barHeight(at: index)
+                    )
+            }
+        }
+        .frame(height: DesignTokens.Pill.levelMeterMaxBarHeight)
+        // Smooths the level meter's 10 Hz ticks into continuous movement.
+        .animation(.easeOut(duration: DesignTokens.Pill.glowLevelSmoothing), value: level)
+    }
+
+    private func barHeight(at index: Int) -> CGFloat {
+        let weight = Self.weights[index % Self.weights.count]
+        let minH = DesignTokens.Pill.levelMeterMinBarHeight
+        let maxH = DesignTokens.Pill.levelMeterMaxBarHeight
+        return minH + (maxH - minH) * CGFloat(min(max(level, 0), 1)) * weight
     }
 }
 
@@ -272,48 +474,78 @@ private struct StopRecordingButton: View {
 
 private final class PillPanel: NSPanel {
     override var canBecomeKey: Bool { false }
+
+    /// Builds a fully configured pill panel.
+    ///
+    /// `level` is assigned LAST on purpose: `isFloatingPanel = true` resets the
+    /// window level to `.floating` (3) as a side effect, so assigning the level
+    /// before it is silently discarded — which is exactly how the pill ended up
+    /// below full-screen windows. Owning the whole configuration here means a
+    /// caller cannot reintroduce that ordering.
+    static func configured(contentRect: NSRect, level: NSWindow.Level) -> PillPanel {
+        let panel = PillPanel(
+            contentRect: contentRect,
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        panel.backgroundColor = .clear
+        panel.isOpaque = false
+        panel.hasShadow = false
+        panel.hidesOnDeactivate = false
+        panel.isFloatingPanel = true
+        panel.becomesKeyOnlyIfNeeded = false
+        // `.canJoinAllSpaces` puts the panel on every space, including
+        // full-screen ones; `.stationary` stops it being dragged along by the
+        // space-switch animation; `.fullScreenAuxiliary` lets it sit atop a
+        // full-screen window; `.ignoresCycle` keeps it out of Cmd-`.
+        panel.collectionBehavior = [
+            .canJoinAllSpaces,
+            .stationary,
+            .fullScreenAuxiliary,
+            .ignoresCycle
+        ]
+        panel.level = level
+        assert(panel.level == level, "window level was clobbered after assignment")
+        return panel
+    }
+
+    /// AppKit constrains window frames so they don't cover the menu bar,
+    /// which silently pushed the pill DOWN below it — the slab is exactly
+    /// notch-height and lives entirely in the menu-bar strip, so the default
+    /// constraint moved it out of the notch every time. Returning the
+    /// requested rect untouched is what lets it sit flush at the top edge.
+    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
+        frameRect
+    }
 }
 
 // MARK: - Display state + root view
 
-/// Copy for the long-running notification card. Equatable (Strings only) so
-/// the controller can morph the copy in place; the button actions live on the
-/// controller as closures (not here) since closures aren't Equatable.
-struct NotificationContent: Equatable {
-    var title: String
-    var message: String
-    var primaryLabel: String
-    var secondaryLabel: String
-}
-
 final class PillDisplayState: ObservableObject {
     @Published var mode: PillMode = .processing
-    /// When non-nil, the widget renders the notification card instead of the
-    /// pill (the "toast morphs into the notification" state).
-    @Published var notification: NotificationContent? = nil
+    /// Mirror of TranscriptionService.audioLevel (0...1), republished here so
+    /// the pill's recording glow can react to mic input.
+    @Published var audioLevel: Float = 0
+    /// Notch width for the current screen, so the pill can keep that span
+    /// clear between its label and its mode indicator. 0 when un-notched.
+    @Published var notchGapWidth: CGFloat = 0
+    /// Offset from the slab's left edge to the notch — see the pill view.
+    @Published var notchLeadingOffset: CGFloat = 0
 }
 
 struct PillRootView: View {
     @ObservedObject var state: PillDisplayState
     let onStop: () -> Void
-    let onNotificationPrimary: () -> Void
-    let onNotificationSecondary: () -> Void
-    let onNotificationDismiss: () -> Void
 
     var body: some View {
-        if let n = state.notification {
-            TranscriptionStatusNotification(
-                title: n.title,
-                message: n.message,
-                primaryLabel: n.primaryLabel,
-                primaryAction: onNotificationPrimary,
-                secondaryLabel: n.secondaryLabel,
-                secondaryAction: onNotificationSecondary,
-                onDismiss: onNotificationDismiss
-            )
-        } else {
-            TranscriptionPillView(mode: state.mode, onStop: onStop)
-        }
+        TranscriptionPillView(
+            mode: state.mode,
+            onStop: onStop,
+            audioLevel: state.audioLevel,
+            notchGapWidth: state.notchGapWidth,
+            notchLeadingOffset: state.notchLeadingOffset
+        )
     }
 }
 
@@ -324,22 +556,13 @@ final class TranscriptionFloatingWidgetController: NSObject {
 
     private weak var transcription: TranscriptionService?
     private var panel: PillPanel?
-    /// One persistent NSHostingView. Driven by `displayState.mode`; never
-    /// replaced across phase transitions.
-    private var hosting: NSHostingView<PillRootView>?
     private let displayState = PillDisplayState()
     private var cancellables = Set<AnyCancellable>()
     private var panelOpenForWidget = false
 
-    private enum Phase { case none, recording, processing, completion, notification }
+    private enum Phase { case none, recording, processing, completion }
     private var phase: Phase = .none
 
-    /// True once the user dismisses the long-running notification (X / Hide)
-    /// or the 5-min auto-hide fires. Suppresses re-showing until the wait
-    /// resets (isWaitingOnRetry → false), at which point it clears.
-    private var notificationDismissed = false
-    /// 5-minute hard cap: auto-hide the notification regardless of state.
-    private var notificationAutoHideWork: DispatchWorkItem?
     private var completionWorkItem: DispatchWorkItem?
     /// The completion message currently being held by `completionWorkItem`.
     /// Used to avoid re-scheduling the hide timer on every sync() tick while
@@ -360,11 +583,35 @@ final class TranscriptionFloatingWidgetController: NSObject {
     /// show.
     private var hideInFlight = false
 
-    var onOpenTranscription: (() -> Void)?
-    /// "Open Notes" action for the long-running notification — set by
-    /// PanelController.setup to open the panel on the Notes tab with the
-    /// Transcriptions filter applied.
-    var onOpenNotes: (() -> Void)?
+    /// Last frame handed to `applyPanelFrame`. `sync()` is driven by the audio
+    /// level meter at 10 Hz, and now that the slab's size is constant while
+    /// recording it would otherwise kick off a fresh frame animation to the
+    /// SAME rect ten times a second — each one cancelling the last, including
+    /// the entrance animation. Tracking the requested target lets repeats be
+    /// dropped. Cleared on hide so the next show re-applies.
+    private var lastRequestedFrame: NSRect?
+
+    /// Re-orders the pill front when the active space changes.
+    private var spaceChangeObserver: NSObjectProtocol?
+
+    /// One-line dump of everything that decides whether the pill is actually
+    /// visible on the current space. `isOnActiveSpace` is the key field: if
+    /// it is false, the panel exists but is on a different space; if it's
+    /// true and the pill still isn't visible, the problem is z-order or
+    /// drawing, not spaces.
+    func logPanelState(_ tag: String) {
+        #if DEBUG
+        guard let panel else { print("[Pill/\(tag)] no panel"); return }
+        let screen = NSScreen.main
+        print("""
+        [Pill/\(tag)] frame=\(panel.frame) level=\(panel.level.rawValue) \
+        visible=\(panel.isVisible) alpha=\(panel.alphaValue) \
+        onActiveSpace=\(panel.isOnActiveSpace) \
+        screenFrame=\(screen?.frame ?? .zero) safeTop=\(screen?.safeAreaInsets.top ?? -1)
+        """)
+        fflush(stdout)
+        #endif
+    }
 
     func attach(transcription: TranscriptionService) {
         // One-time cleanup of the snap-zone key persisted by prior builds
@@ -382,6 +629,9 @@ final class TranscriptionFloatingWidgetController: NSObject {
 
     deinit {
         completionWorkItem?.cancel()
+        if let obs = spaceChangeObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(obs)
+        }
     }
 
     func setPanelOpenForWidget(_ open: Bool) {
@@ -391,6 +641,21 @@ final class TranscriptionFloatingWidgetController: NSObject {
 
     private func sync() {
         guard let ts = transcription else { hidePanel(); return }
+
+        // Republish the live mic level for the pill's recording border.
+        // sync() is already driven by TranscriptionService.objectWillChange,
+        // which the level-meter timer fires at 10 Hz, so this lands on every
+        // tick. TranscriptionService zeroes audioLevel when recording stops.
+        if displayState.audioLevel != ts.audioLevel {
+            displayState.audioLevel = ts.audioLevel
+        }
+
+        // Keep the reserved notch span in step with the current screen, so
+        // moving to/from an external display relays the pill correctly.
+        let gap = currentNotchMetrics().notchWidth
+        if displayState.notchGapWidth != gap {
+            displayState.notchGapWidth = gap
+        }
 
         if panelOpenForWidget {
             cancelAllPendingWork()
@@ -453,7 +718,7 @@ final class TranscriptionFloatingWidgetController: NSObject {
                 // dynamic sizing. applyPhaseFrame still runs before
                 // showCollapsedPanelIfNeeded so the slide-in animation
                 // captures the canonical phase target.
-                updateHosted(mode: .recording(durationSeconds: ts.duration))
+                updateHosted(mode: .recording)
                 applyPhaseFrame(animated: oldPhase != .none)
                 showCollapsedPanelIfNeeded()
             }
@@ -471,101 +736,11 @@ final class TranscriptionFloatingWidgetController: NSObject {
             return
         }
 
-        // Long-running stall: nothing else is showing and the upload is
-        // waiting on a retry. Morph the pill into the notification card.
-        // A user dismiss / 5-min auto-hide suppresses it until the wait
-        // resets (handled by `notificationDismissed`).
-        if ts.isWaitingOnRetry {
-            if notificationDismissed {
-                // Dismissed but still waiting — keep the pill hidden; the
-                // inline "Waiting" shimmer in the filter bar is the indicator.
-                if phase != .completion { hidePanel(); phase = .none }
-                return
-            }
-            enterNotificationPhase(attempt: ts.waitingRetryAttempt)
-            return
-        }
-
-        // Not waiting anymore — clear any notification state.
-        if phase == .notification || displayState.notification != nil {
-            clearNotification()
-        }
-
         if phase != .completion {
             hidePanel()
             phase = .none
             heldCompletionMessage = nil
         }
-    }
-
-    // MARK: - Long-running notification
-
-    private func enterNotificationPhase(attempt: Int) {
-        let oldPhase = phase
-        let content: NotificationContent
-        if attempt >= 3 {
-            content = NotificationContent(
-                title: "Still trying",
-                message: "We'll keep retrying. Check your Notes panel anytime.",
-                primaryLabel: "Open Notes",
-                secondaryLabel: "Hide"
-            )
-        } else {
-            content = NotificationContent(
-                title: "Taking longer than usual",
-                message: "Your transcript will appear in Notes when ready",
-                primaryLabel: "Open Notes",
-                secondaryLabel: "Dismiss"
-            )
-        }
-        let firstShow = (phase != .notification)
-        cancelAllPendingWork()   // notification is its own phase; drop any completion timer
-        phase = .notification
-        heldCompletionMessage = nil
-        // Set the card content; sizeForCurrentMode reads displayState.notification.
-        if displayState.notification != content { displayState.notification = content }
-        applyPhaseFrame(animated: oldPhase != .none)
-        showCollapsedPanelIfNeeded()
-        if firstShow { startNotificationAutoHide() }
-    }
-
-    private func startNotificationAutoHide() {
-        notificationAutoHideWork?.cancel()
-        let work = DispatchWorkItem { [weak self] in
-            // 5-min cap: hide but keep the session retrying silently.
-            self?.dismissNotification()
-        }
-        notificationAutoHideWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 5 * 60, execute: work)
-    }
-
-    /// Hide the notification and suppress re-show until the wait resets.
-    /// Used by the X button, the "Dismiss"/"Hide" button, and the 5-min cap.
-    /// Sets `notificationDismissed` so `sync()` won't re-show while the
-    /// session is still waiting.
-    func dismissNotification() {
-        notificationDismissed = true
-        notificationAutoHideWork?.cancel()
-        notificationAutoHideWork = nil
-        if displayState.notification != nil { displayState.notification = nil }
-        hidePanel()
-        phase = .none
-    }
-
-    /// Tear down the card content + auto-hide timer and reset the dismissed
-    /// flag. Called when the wait resets (isWaitingOnRetry → false) so a
-    /// future stall shows the notification again.
-    private func clearNotification() {
-        notificationAutoHideWork?.cancel()
-        notificationAutoHideWork = nil
-        notificationDismissed = false
-        if displayState.notification != nil { displayState.notification = nil }
-    }
-
-    /// "Open Notes" action — deep-link, then dismiss the card.
-    func openNotesFromNotification() {
-        onOpenNotes?()
-        dismissNotification()
     }
 
     /// Fires when the completion's hold timer expires. Returns the pill to
@@ -583,7 +758,7 @@ final class TranscriptionFloatingWidgetController: NSObject {
         if let ts = transcription {
             if ts.isRecording {
                 phase = .recording
-                updateHosted(mode: .recording(durationSeconds: ts.duration))
+                updateHosted(mode: .recording)
                 applyPhaseFrame(animated: true)
                 return
             }
@@ -603,12 +778,8 @@ final class TranscriptionFloatingWidgetController: NSObject {
     /// non-animated on first show (oldPhase == .none) so the panel doesn't
     /// briefly render at a stale size before snapping.
     ///
-    /// `.processing` shrinks to a 32×32 square (visually a circle once the
-    /// capsule background applies); every other phase expands back to the
-    /// full pill width. Ease-in-out timing pairs with the SwiftUI side's
-    /// staggered fade-out / pause / fade-in so the AppKit frame
-    /// "slows down" through the middle of the transition just as the
-    /// SwiftUI cross-fade is between layers.
+    /// Recording and processing are deliberately the same size, so in
+    /// practice this only animates on the way into a completion message.
     private func applyPhaseFrame(animated: Bool) {
         let size = sizeForCurrentMode()
         applyPhaseAwareFrame(
@@ -628,54 +799,110 @@ final class TranscriptionFloatingWidgetController: NSObject {
     /// BEFORE calling applyPhaseFrame), so the size always reflects the
     /// content that's about to be displayed.
     private func sizeForCurrentMode() -> NSSize {
-        // Notification card supersedes the pill modes when active. Measure its
-        // intrinsic height via a throwaway hosting view (width is fixed at 340
-        // by the card's own .frame); actions are no-ops for measurement.
-        if let n = displayState.notification {
-            let probe = NSHostingView(rootView: TranscriptionStatusNotification(
-                title: n.title, message: n.message,
-                primaryLabel: n.primaryLabel, primaryAction: {},
-                secondaryLabel: n.secondaryLabel, secondaryAction: {},
-                onDismiss: {}
-            ))
-            return NSSize(width: 340, height: probe.fittingSize.height)
-        }
-        let height = DesignTokens.Pill.height
+        // The slab is only as tall as the notch, so its content sits AT
+        // menu-bar level in the strips either side of the notch. On an
+        // un-notched display it falls back to the standard pill height.
+        let metrics = currentNotchMetrics()
+        // The label is centred inside a content row of `Pill.height` pinned to
+        // the slab's top, so its baseline sits at menu-bar level. Height is
+        // then derived so exactly `labelBottomGap` remains beneath the label's
+        // line box — and never less than the notch band, which the slab must
+        // still cover.
+        let labelLineHeight = ceil(Self.completionLabelFont.ascender
+            - Self.completionLabelFont.descender)
+        let labelBottomFromTop = DesignTokens.Pill.height / 2 + labelLineHeight / 2
+        let height = max(
+            metrics.bandHeight,
+            labelBottomFromTop + DesignTokens.Pill.labelBottomGap
+        )
+
+        // Width = label (left strip) + clear notch gap + indicator (right
+        // strip) + the outer paddings. Long completion messages simply widen
+        // the slab further out from the notch.
+        // With no notch there is no gap to reserve, so fall back to the
+        // ordinary inter-element spacing and the pill stays compact.
+        // `leadingContentWidth` already includes one inset, so only the
+        // trailing side's inset is added here.
+        let gap = metrics.notchWidth > 0
+            ? metrics.notchWidth + DesignTokens.Pill.notchContentInset
+            : DesignTokens.Pill.compactContentGap
+        let width = leadingContentWidth()
+            + gap
+            + currentIndicatorWidth()
+            + DesignTokens.Pill.trailingPadding
+            + Self.measurementSafetyMargin
+            // Room for the concave flare on each side, so the body keeps the
+            // width its content needs and the flares extend beyond it.
+            + DesignTokens.Pill.notchTopFlareRadius * 2
+        return NSSize(width: width, height: height)
+    }
+
+    /// Distance from the slab's left edge to where the notch begins:
+    /// leading padding + the label + its clearance from the notch. The
+    /// positioning code subtracts this from the notch's left edge so the
+    /// label always lands fully inside the left menu-bar strip.
+    private func leadingContentWidth() -> CGFloat {
+        let labelW: CGFloat
         switch displayState.mode {
-        case .processing:
-            return NSSize(width: height, height: height)
-        case .recording(let seconds):
-            let labelW = measureLabelWidth(formatPillDuration(seconds), font: Self.recordingLabelFont)
-            let width = Self.basePillFixedWidth + labelW + DesignTokens.Pill.recordingDotSize + Self.measurementSafetyMargin
-            return NSSize(width: width, height: height)
-        case .completion(let message):
-            let labelW = measureLabelWidth(message, font: Self.completionLabelFont)
-            let width = Self.basePillFixedWidth + labelW + Self.measurementSafetyMargin
-            return NSSize(width: width, height: height)
+        // Recording and processing share ONE measurement so the slab keeps a
+        // constant width and x-origin across the Listening… → Processing
+        // swap: only the text cross-fades, the pill itself never resizes or
+        // shifts. Uses the wider of the two so neither label is clipped.
+        case .recording, .processing:  labelW = Self.steadyLabelWidth
+        case .completion(let msg):     labelW = measureLabelWidth(msg, font: Self.completionLabelFont)
+        }
+        return DesignTokens.Pill.leadingPadding
+            + labelW
+            + DesignTokens.Pill.notchContentInset
+    }
+
+    /// Distance from the PANEL's left edge to where the notch begins. Used
+    /// both to place the panel and to split the glow, which must agree — so
+    /// they read the same value rather than each re-adding the flare.
+    private func bodyLeadingOffset() -> CGFloat {
+        leadingContentWidth() + DesignTokens.Pill.notchTopFlareRadius
+    }
+
+    /// Wider of the two in-progress labels — see `leadingContentWidth`. Both
+    /// inputs are compile-time constants and the font is static, so this is
+    /// measured once rather than on every 10 Hz sync tick.
+    private static let steadyLabelWidth: CGFloat = max(
+        measure(TranscriptionPillView.recordingLabelText, font: completionLabelFont),
+        measure(TranscriptionPillView.processingLabelText, font: completionLabelFont)
+    )
+
+    private static func measure(_ text: String, font: NSFont) -> CGFloat {
+        ceil((text as NSString).size(withAttributes: [.font: font]).width)
+    }
+
+    /// Rendered width of the right-hand mode indicator.
+    private func currentIndicatorWidth() -> CGFloat {
+        switch displayState.mode {
+        // Same reasoning as `steadyLabelWidth`: the meter and the spinner
+        // reserve identical space so the swap doesn't nudge the width.
+        case .recording, .processing:
+            return max(Self.levelMeterWidth, Self.spinnerIndicatorWidth)
+        case .completion:
+            return DesignTokens.Pill.iconGlyphSize
         }
     }
 
-    /// Sum of all fixed-width contributions to the pill (paddings + iconDisc
-    /// + the two label-padding gaps). The variable-width contribution is
-    /// the label text and, for recording mode, the red stop dot.
-    private static var basePillFixedWidth: CGFloat {
-        DesignTokens.Pill.leadingPadding
-            + DesignTokens.Pill.iconDiscSize
-            + DesignTokens.Pill.iconToTimerSpacing
-            + DesignTokens.Pill.timerToDotSpacing
-            + DesignTokens.Pill.trailingPadding
+    /// Rendered widths of the right-hand indicators, mirroring what the
+    /// SwiftUI side lays out so the slab measures correctly.
+    private static var levelMeterWidth: CGFloat {
+        let count = CGFloat(DesignTokens.Pill.levelMeterBarCount)
+        return count * DesignTokens.Pill.levelMeterBarWidth
+            + max(0, count - 1) * DesignTokens.Pill.levelMeterBarSpacing
     }
+
+    /// `ProgressView` at `.small` control size renders ~16pt square.
+    private static let spinnerIndicatorWidth: CGFloat = 16
 
     /// SwiftUI's Text rendering can disagree with NSString.size by a sub-pt
     /// fraction; a 2pt safety margin avoids the very-last character being
     /// clipped by the capsule's rounded right end.
     private static let measurementSafetyMargin: CGFloat = 2
 
-    /// Fonts that match what the SwiftUI body uses for each mode's label.
-    /// Recording timer uses `.system(size: 14, weight: .regular).monospacedDigit()`;
-    /// completion messages use `.system(size: 14, weight: .regular)`. Both
-    /// have direct AppKit equivalents below.
-    private static let recordingLabelFont = NSFont.monospacedDigitSystemFont(ofSize: 14, weight: .regular)
     private static let completionLabelFont = NSFont.systemFont(ofSize: 14, weight: .regular)
 
     private func measureLabelWidth(_ text: String, font: NSFont) -> CGFloat {
@@ -692,6 +919,12 @@ final class TranscriptionFloatingWidgetController: NSObject {
 
     private func updateHosted(mode: PillMode) {
         if displayState.mode != mode { displayState.mode = mode }
+        // Recomputed after the mode is set, since the offset depends on the
+        // label width for that mode.
+        let offset = bodyLeadingOffset()
+        if displayState.notchLeadingOffset != offset {
+            displayState.notchLeadingOffset = offset
+        }
     }
 
     private func showCollapsedPanelIfNeeded() {
@@ -709,6 +942,9 @@ final class TranscriptionFloatingWidgetController: NSObject {
         // tail, triggering exactly that cancellation.
         if panel.isVisible && !hideInFlight {
             panel.orderFrontRegardless()
+            // A previous fade could have left alpha below 1; never leave the
+            // panel on top but invisible.
+            if panel.alphaValue < 1 { panel.alphaValue = 1 }
             return
         }
 
@@ -721,24 +957,101 @@ final class TranscriptionFloatingWidgetController: NSObject {
         let token = visibilityAnimationToken
 
         let target = panel.frame
-        let startFrame = target.offsetBy(dx: 0, dy: DesignTokens.PanelAnimation.openSlideOffset)
+        let startFrame = target.offsetBy(dx: 0, dy: DesignTokens.Pill.entranceSlideOffset)
         panel.setFrame(startFrame, display: false)
         panel.alphaValue = 0
         panel.orderFrontRegardless()
 
         NSAnimationContext.runAnimationGroup({ ctx in
-            ctx.duration = DesignTokens.PanelAnimation.openDuration
-            ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            ctx.duration = DesignTokens.Pill.entranceDuration
+            // Plain decelerating ease — fast out of the notch, settling
+            // gently. See the token comments for why there is no overshoot.
+            ctx.timingFunction = CAMediaTimingFunction(controlPoints:
+                Float(DesignTokens.Pill.entranceCurveCP1x),
+                Float(DesignTokens.Pill.entranceCurveCP1y),
+                Float(DesignTokens.Pill.entranceCurveCP2x),
+                Float(DesignTokens.Pill.entranceCurveCP2y)
+            )
             panel.animator().setFrame(target, display: true)
             panel.animator().alphaValue = 1
         }, completionHandler: { [weak self] in
             // Token guard: if a hide superseded this show, ignore.
             guard let self, self.visibilityAnimationToken == token else { return }
+            // Pin the end state explicitly. If the fade is ever interrupted
+            // or skipped, the panel would otherwise sit on top at alpha 0 —
+            // present in the window list but invisible on screen.
+            panel.alphaValue = 1
+            panel.setFrame(target, display: true)
+            self.logPanelState("shown")
         })
     }
 
-    /// Position the panel at its fixed top-center anchor using the given size.
-    /// The pill is not draggable; this is the only zone it ever uses.
+    /// Notch geometry for the screen the pill is anchored to.
+    ///
+    /// All fields are 0 on displays without a notch, which collapses every
+    /// consumer back to plain flush-top-center behaviour.
+    private struct NotchMetrics {
+        /// Height of the notch — the black band drawn above the content row.
+        let bandHeight: CGFloat
+        /// Horizontal center to align the slab on. Uses the notch's true
+        /// center, which is not always exactly the screen's midX.
+        let centerX: CGFloat
+        /// Width of the notch itself — reserved as clear space between the
+        /// label (left strip) and the mode indicator (right strip).
+        let notchWidth: CGFloat
+        /// Left edge of the notch, used to align the slab's reserved gap
+        /// with the notch rather than centering the slab on it.
+        let notchMinX: CGFloat
+    }
+
+    /// `safeAreaInsets` / `auxiliaryTopLeftArea` / `auxiliaryTopRightArea` are
+    /// all macOS 12+, so they need no availability gate at our macOS 13
+    /// deployment target. On a notched display the auxiliary areas are the
+    /// menu-bar strips either side of the notch; the gap between them IS the
+    /// notch. When either is nil (external monitor, non-notched Mac) we fall
+    /// back to screen-center with no band.
+    private func notchMetrics(for screen: NSScreen) -> NotchMetrics {
+        if screen.safeAreaInsets.top > 0,
+           let left = screen.auxiliaryTopLeftArea,
+           let right = screen.auxiliaryTopRightArea {
+            let notchWidth = right.minX - left.maxX
+            if notchWidth > 0 {
+                return NotchMetrics(
+                    bandHeight: screen.safeAreaInsets.top,
+                    centerX: (left.maxX + right.minX) / 2,
+                    notchWidth: notchWidth,
+                    notchMinX: left.maxX
+                )
+            }
+        }
+        return NotchMetrics(bandHeight: 0, centerX: screen.frame.midX, notchWidth: 0, notchMinX: 0)
+    }
+
+    /// Metrics for the pill's current anchor screen, or a no-notch default.
+    ///
+    /// Cached per display: the notch is physical hardware, so the numbers can
+    /// only change when the screen layout does. `sync()` runs at the level
+    /// meter's 10 Hz, and this otherwise re-queried NSScreen on every tick.
+    private func currentNotchMetrics() -> NotchMetrics {
+        guard let screen = NSScreen.main else {
+            return NotchMetrics(bandHeight: 0, centerX: 0, notchWidth: 0, notchMinX: 0)
+        }
+        let id = screen.displayID
+        if let cached = cachedNotchMetrics[id] { return cached }
+        let metrics = notchMetrics(for: screen)
+        cachedNotchMetrics[id] = metrics
+        return metrics
+    }
+
+    private var cachedNotchMetrics: [CGDirectDisplayID: NotchMetrics] = [:]
+
+    /// Position the panel flush against the display's physical top edge,
+    /// centered on the notch, so it reads as emerging from it. The pill is
+    /// not draggable; this is the only anchor it ever uses.
+    ///
+    /// Note this anchors to `screen.frame` (physical bounds), NOT
+    /// `visibleFrame` (which starts below the menu bar) — that difference is
+    /// what makes the slab touch the top edge rather than float under it.
     private func applyPhaseAwareFrame(
         size: CGSize,
         animated: Bool,
@@ -746,7 +1059,22 @@ final class TranscriptionFloatingWidgetController: NSObject {
         timingFunction: CAMediaTimingFunction? = nil
     ) {
         guard let screen = NSScreen.main else { return }
-        let target = PanelSnapZone.topCenter.visibleFrame(size: size, screen: screen.visibleFrame)
+
+        let metrics = notchMetrics(for: screen)
+        // Align the slab's reserved GAP with the notch, rather than centering
+        // the slab on it. The label and the indicator have different widths,
+        // so a centered slab would slide the wider one (the label) partly
+        // under the notch. Un-notched displays just center.
+        let unclampedX = metrics.notchWidth > 0
+            // leadingContentWidth is measured to the BODY's left edge, and the
+            // body now starts one flare-width in from the panel, so shift the
+            // panel left by that much to keep the notch gap aligned.
+            ? metrics.notchMinX - bodyLeadingOffset()
+            : metrics.centerX - size.width / 2
+        // Clamp so an unusually wide slab can't hang off a narrow display.
+        let x = min(max(unclampedX, screen.frame.minX), screen.frame.maxX - size.width)
+        let y = screen.frame.maxY - size.height
+        let target = NSRect(x: x, y: y, width: size.width, height: size.height)
         applyPanelFrame(target, animated: animated, duration: duration, timingFunction: timingFunction)
     }
 
@@ -760,6 +1088,9 @@ final class TranscriptionFloatingWidgetController: NSObject {
         timingFunction: CAMediaTimingFunction? = nil
     ) {
         guard let panel else { return }
+        // Already heading here — leave the in-flight animation alone.
+        if let last = lastRequestedFrame, last.equalTo(frame) { return }
+        lastRequestedFrame = frame
         if animated {
             NSAnimationContext.runAnimationGroup { ctx in
                 ctx.duration = duration
@@ -787,11 +1118,19 @@ final class TranscriptionFloatingWidgetController: NSObject {
         hideInFlight = true
         let token = visibilityAnimationToken
 
-        let endFrame = panel.frame.offsetBy(dx: 0, dy: DesignTokens.PanelAnimation.closeSlideOffset)
+        // Next show must re-apply its frame rather than being treated as a
+        // repeat of the target we're animating away from.
+        lastRequestedFrame = nil
+        let endFrame = panel.frame.offsetBy(dx: 0, dy: DesignTokens.Pill.exitSlideOffset)
 
         NSAnimationContext.runAnimationGroup({ ctx in
-            ctx.duration = DesignTokens.PanelAnimation.closeDuration
-            ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            ctx.duration = DesignTokens.Pill.exitDuration
+            ctx.timingFunction = CAMediaTimingFunction(controlPoints:
+                Float(DesignTokens.Pill.exitCurveCP1x),
+                Float(DesignTokens.Pill.exitCurveCP1y),
+                Float(DesignTokens.Pill.exitCurveCP2x),
+                Float(DesignTokens.Pill.exitCurveCP2y)
+            )
             panel.animator().setFrame(endFrame, display: true)
             panel.animator().alphaValue = 0
         }, completionHandler: { [weak self, weak panel] in
@@ -804,47 +1143,55 @@ final class TranscriptionFloatingWidgetController: NSObject {
     }
 
     private func buildPanel() {
-        let w = DesignTokens.Pill.width
-        let h = DesignTokens.Pill.height
-        let level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.floatingWindow)) + 1)
+        let initialSize = sizeForCurrentMode()
+        let w = initialSize.width
+        let h = initialSize.height
+        // Shielding level is the highest level AppKit exposes — above the
+        // menu bar, above full-screen windows, above Mission Control. The
+        // pill is a transient status surface that must never be occluded.
+        // Trade-off: it also draws over context menus and Mission Control.
+        let level = NSWindow.Level(rawValue: Int(CGShieldingWindowLevel()))
 
-        let p = PillPanel(
+        let p = PillPanel.configured(
             contentRect: NSRect(x: 0, y: 0, width: w, height: h),
-            styleMask: [.borderless, .nonactivatingPanel],
-            backing: .buffered,
-            defer: false
+            level: level
         )
-        p.level = level
-        p.backgroundColor = .clear
-        p.isOpaque = false
-        p.hasShadow = false
-        p.hidesOnDeactivate = false
-        p.isFloatingPanel = true
-        p.becomesKeyOnlyIfNeeded = false
-        p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+
+        // Re-assert front when the active space changes. `.canJoinAllSpaces`
+        // is normally enough on its own, but if anything does reorder the
+        // panel during a switch into (or out of) a full-screen space, this
+        // puts it back on top without waiting for the next sync().
+        spaceChangeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.activeSpaceDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, let panel = self.panel, panel.isVisible else { return }
+                panel.orderFrontRegardless()
+                self.logPanelState("spaceChange")
+            }
+        }
 
         let root = PillRootView(
             state: displayState,
-            onStop: { [weak self] in self?.transcription?.stopRecording() },
-            onNotificationPrimary: { [weak self] in self?.openNotesFromNotification() },
-            onNotificationSecondary: { [weak self] in self?.dismissNotification() },
-            onNotificationDismiss: { [weak self] in self?.dismissNotification() }
+            onStop: { [weak self] in self?.transcription?.stopRecording() }
         )
         let host = NSHostingView(rootView: root)
         host.frame = NSRect(x: 0, y: 0, width: w, height: h)
         host.autoresizingMask = [.width, .height]
 
         p.contentView = host
-        hosting = host
         panel = p
 
         restorePosition()
     }
 
-    /// Position the pill at its fixed top-center anchor. The pill is not
-    /// draggable; there's no per-user position to restore.
+    /// Position the pill at its fixed notch anchor. The pill is not
+    /// draggable; there's no per-user position to restore. Uses the
+    /// mode-derived size rather than the static fallback so the very first
+    /// placement already accounts for the notch band and minimum slab width.
     private func restorePosition() {
-        let size = NSSize(width: DesignTokens.Pill.width, height: DesignTokens.Pill.height)
-        applyPhaseAwareFrame(size: size, animated: false)
+        applyPhaseAwareFrame(size: sizeForCurrentMode(), animated: false)
     }
 }
