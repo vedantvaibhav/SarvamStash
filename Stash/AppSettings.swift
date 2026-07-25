@@ -24,6 +24,47 @@ enum QuickPanelLayoutStyle: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
+// MARK: - Sarvam output mode
+
+/// What Saaras should return for regional-language speech. Maps 1:1 onto
+/// Sarvam's `mode` form field, which only `saaras:v3` honours.
+///
+/// `language_code` is optional on all three, so every option supports
+/// auto-detected multilingual input — nothing here pins a language.
+enum SarvamOutputMode: String, CaseIterable {
+    /// Saaras `mode="translate"` — regional speech comes back as English.
+    case english  = "english"
+    /// Saaras `mode="codemix"` — Hinglish-style mixed script.
+    case codemix  = "codemix"
+    /// Saaras `mode="transcribe"` — native script, pasted as-is.
+    case native   = "native"
+
+    /// The literal value sent as Sarvam's `mode` field.
+    var sarvamMode: String {
+        switch self {
+        case .english: return "translate"
+        case .codemix: return "codemix"
+        case .native:  return "transcribe"
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .english: return "English"
+        case .codemix: return "Codemix"
+        case .native:  return "Native"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .english: return "Convert speech to English"
+        case .codemix: return "Hinglish-style mixed script"
+        case .native:  return "Native script, pasted as-is"
+        }
+    }
+}
+
 // MARK: - Double-tap quick record
 
 enum DoubleTapQuickRecord: String, CaseIterable {
@@ -104,6 +145,14 @@ final class AppSettings: ObservableObject {
         didSet { ud.set(launchAtLogin, forKey: Keys.launchAtLogin) }
     }
 
+    // MARK: Transcription output
+
+    /// Regional-language output mode for Sarvam Saaras. Read on every Saaras
+    /// call and passed through as `mode`.
+    @Published var sarvamOutputMode: SarvamOutputMode {
+        didSet { ud.set(sarvamOutputMode.rawValue, forKey: Keys.sarvamOutputMode) }
+    }
+
     // MARK: Notes filter
 
     /// Active filter applied to the Notes tab list. Persisted as raw
@@ -143,6 +192,11 @@ final class AppSettings: ObservableObject {
         let savedLogin = ud.object(forKey: Keys.launchAtLogin) as? Bool
         launchAtLogin = savedLogin ?? false
 
+        // Codemix default: it needs no `language_code`, so multilingual
+        // dictation works out of the box.
+        let savedSarvamMode = ud.string(forKey: Keys.sarvamOutputMode) ?? SarvamOutputMode.codemix.rawValue
+        sarvamOutputMode = SarvamOutputMode(rawValue: savedSarvamMode) ?? .codemix
+
         let savedNotesFilter = ud.string(forKey: Keys.notesActiveFilter) ?? NotesFilter.all.rawValue
         notesActiveFilter = NotesFilter(rawValue: savedNotesFilter) ?? .all
 
@@ -169,6 +223,7 @@ final class AppSettings: ObservableObject {
         static let quickRecordHotKeyModifiers = "qp.quickRecordHotKeyModifiers"
         static let doubleTapQuickRecord       = "qp.doubleTapQuickRecord"
         static let notesActiveFilter          = "qp.notesActiveFilter"
+        static let sarvamOutputMode           = "qp.sarvamOutputMode"
     }
 }
 
