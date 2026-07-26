@@ -294,6 +294,7 @@ struct SettingsView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 hotkeySection
+                transcriptionOutputSection
                 autoHideSection
                 permissionsSection
                 launchAtLoginSection
@@ -342,6 +343,28 @@ struct SettingsView: View {
                 HotkeyRecorderRow(label: "Open/Close Tray", slot: .primaryPanelToggle)
                 HotkeyRecorderRow(label: "Quick Record",    slot: .quickRecord)
             }
+        }
+    }
+
+    // MARK: - Transcription output section
+
+    /// Regional-language output mode. Passed straight through to Sarvam
+    /// Saaras as its `mode` field on every transcription.
+    private var transcriptionOutputSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Transcription Output")
+                .font(.system(size: 13, weight: .regular))
+                .foregroundColor(.white.opacity(0.45))
+
+            SettingsSegmentedPicker(
+                options: SarvamOutputMode.allCases.map { ($0.label, $0) },
+                selection: $settings.sarvamOutputMode
+            )
+
+            Text(settings.sarvamOutputMode.detail)
+                .font(.system(size: 12, weight: .regular))
+                .foregroundColor(.white.opacity(0.35))
+                .padding(.leading, 2)
         }
     }
 
@@ -596,9 +619,11 @@ private struct PermissionRow: View {
     }
 }
 
-private struct SettingsSegmentedPicker: View {
-    let options: [(label: String, value: Double)]
-    @Binding var selection: Double
+/// Generic over the selected value so the same control drives both the
+/// Double-valued auto-hide row and the enum-valued transcription-output row.
+private struct SettingsSegmentedPicker<Value: Hashable>: View {
+    let options: [(label: String, value: Value)]
+    @Binding var selection: Value
     @Namespace private var ns
 
     var body: some View {
