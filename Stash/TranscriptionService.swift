@@ -1295,12 +1295,23 @@ final class TranscriptionService: NSObject, ObservableObject {
         Task.detached { [weak self] in
             guard let self else { return }
             do {
+                #if DEBUG
+                let cleanupStartedAt = Date()
+                #endif
                 let cleaned = try await self.runChat(
                     systemPrompt: cleanupPrompt,
                     userMessage: text,
                     maxTokens: 1024,
                     model: APIConstants.chatModelForShortClean
                 )
+                #if DEBUG
+                // How long the short-clean pass costs. Load-bearing for the
+                // open question of whether the paste can afford to WAIT for
+                // this rather than pasting the raw transcript and refining the
+                // note behind it.
+                let cleanupMs = Int(Date().timeIntervalSince(cleanupStartedAt) * 1000)
+                print("[Cleanup] \(APIConstants.chatModelForShortClean) took \(cleanupMs)ms for \(text.count) chars")
+                #endif
                 if let rawNoteId {
                     await MainActor.run { [weak self] in
                         self?.notesStorage?.replaceTranscriptContent(
