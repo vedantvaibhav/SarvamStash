@@ -133,12 +133,38 @@ enum DesignTokens {
         static let glowBaseOpacity: Double = 0.65
         static let glowLevelOpacityBoost: Double = 0.40
         static let glowLevelSmoothing: TimeInterval = 0.12
-        // "Sexy Blue" ramp — #007BFF → #B0E0E6, with two interpolated stops
-        // between so the bloom reads as a gradient rather than two flat ends.
-        static let glowColorA = Color(red: 0.000, green: 0.482, blue: 1.000)  // #007BFF
-        static let glowColorB = Color(red: 0.231, green: 0.584, blue: 0.980)  // #3B95FA
-        static let glowColorC = Color(red: 0.463, green: 0.686, blue: 0.957)  // #76AFF4
-        static let glowColorD = Color(red: 0.690, green: 0.878, blue: 0.902)  // #B0E0E6
+        // The glow carries STATE, not just decoration — it is readable from
+        // the corner of the eye before the label is. Each ramp runs saturated
+        // → pale across a segment's own width, with two interpolated stops so
+        // the bloom reads as a gradient rather than two flat ends, and all
+        // three land at the same visual weight through the same blur and mask.
+
+        /// Listening — the original "Sexy Blue" ramp, #007BFF → #B0E0E6.
+        static let glowColorsListening: [Color] = [
+            Color(red: 0.000, green: 0.482, blue: 1.000),  // #007BFF
+            Color(red: 0.231, green: 0.584, blue: 0.980),  // #3B95FA
+            Color(red: 0.463, green: 0.686, blue: 0.957),  // #76AFF4
+            Color(red: 0.690, green: 0.878, blue: 0.902)   // #B0E0E6
+        ]
+
+        /// Processing — neutral greyscale, #6E6E73 → #F2F2F7. Deliberately
+        /// colourless: the work is indeterminate, so the pill should read as
+        /// "busy" without implying an outcome.
+        static let glowColorsProcessing: [Color] = [
+            Color(red: 0.431, green: 0.431, blue: 0.451),  // #6E6E73
+            Color(red: 0.596, green: 0.596, blue: 0.616),  // #98989D
+            Color(red: 0.780, green: 0.780, blue: 0.800),  // #C7C7CC
+            Color(red: 0.949, green: 0.949, blue: 0.969)   // #F2F2F7
+        ]
+
+        /// Failure — #FF3B30 → #FFC4C0, mirroring the blue ramp's structure so
+        /// the swap reads as a colour change rather than a brightness one.
+        static let glowColorsFailure: [Color] = [
+            Color(red: 1.000, green: 0.231, blue: 0.188),  // #FF3B30
+            Color(red: 1.000, green: 0.384, blue: 0.349),  // #FF6259
+            Color(red: 1.000, green: 0.541, blue: 0.522),  // #FF8A85
+            Color(red: 1.000, green: 0.769, blue: 0.753)   // #FFC4C0
+        ]
 
         // MARK: Recording level meter (right of the notch)
         static let levelMeterBarCount: Int = 4
@@ -181,8 +207,8 @@ enum DesignTokens {
         // Completion hold durations — how long the pill displays a completion
         // message before hiding (or returning to recording for mid-recording
         // warnings). `completionDefaultHold` matches the historical 1.6s
-        // behaviour for end-of-recording results ("Note saved", "Pasted ✓",
-        // "No audio"). `completionWarningHold` is the longer hold used for
+        // behaviour for end-of-recording results ("Pasted ✓", "No audio",
+        // "Failed"). `completionWarningHold` is the longer hold used for
         // mid-recording warnings (85-min, 20-MB) so the user has time to
         // read them while the recording continues.
         static let completionDefaultHold: TimeInterval = 1.6

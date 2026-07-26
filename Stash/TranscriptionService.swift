@@ -1127,7 +1127,8 @@ final class TranscriptionService: NSObject, ObservableObject {
     }
 
     /// Phase 1: saves the raw Whisper transcript as a meeting note immediately.
-    /// Phase 2: shows "Note saved" pill right away.
+    /// Phase 2: auto-opens the note editor, which is the user-visible
+    ///           confirmation — there is no completion pill on this path.
     /// Phase 3: async cleanup + overview generation — on success, updates the
     ///           same note in place; on failure, the raw transcript stays.
     @MainActor
@@ -1139,8 +1140,11 @@ final class TranscriptionService: NSObject, ObservableObject {
             overview: "",
             durationSeconds: durationSeconds
         )
-        // User sees "Note saved" right away. Cleanup will refine the same note silently.
-        showCompletion("Note saved")
+        // No completion pill here. The note editor opening (just below) is
+        // itself the confirmation — a "Note saved" pill on top of it said the
+        // same thing twice, in the notch, over a window that had already
+        // appeared. Cleanup refines the same note silently afterwards.
+        //
         // Notify PanelController so it can auto-open the editor for the new
         // meeting note (matches the pre-rewrite UX). Short path intentionally
         // does NOT fire this — short-clip primary delivery is pasteboard +
