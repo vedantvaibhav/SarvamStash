@@ -827,7 +827,15 @@ final class TranscriptionService: NSObject, ObservableObject {
         }
 
         let whisperResponse: WhisperResponse
-        if let sarvamText {
+        // `!isEmpty` is load-bearing, not defensive noise. Saaras can answer
+        // 200 with `{"transcript": ""}`, which parses to an empty (trimmed)
+        // string — a SUCCESS as far as `if let` is concerned. Without this
+        // check that empty result skips Whisper entirely, then fails the
+        // downstream silence filter, and the user gets "No audio" plus a Slack
+        // report blaming Whisper for a transcription Whisper never attempted.
+        // An empty Saaras body has to fall through to the fallback like any
+        // other Saaras failure.
+        if let sarvamText, !sarvamText.isEmpty {
             // Saaras succeeded — skip Whisper and reuse the same downstream
             // pipeline (sanitise → LLM cleanup → deliver) unchanged.
             whisperResponse = WhisperResponse(text: sarvamText)
