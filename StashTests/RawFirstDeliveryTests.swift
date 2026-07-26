@@ -64,12 +64,6 @@ struct RawFirstDeliveryTests {
         }
     }
 
-    // `uploadSessionEntryResetsWaitingState` was removed here. It asserted on
-    // `isWaitingOnRetry` / `waitingRetryAttempt`, the published state behind
-    // the stall modal, which commit 17b4fb7 ("remove onboarding, auth, and
-    // stall modal") deleted. The test was left behind and stopped compiling
-    // with it, which took the whole StashTests target down.
-    //
-    // Deleted rather than repaired: both assertions targeted the removed
-    // flags, so nothing testable remained once they went.
+    // A waiting-on-retry test was removed here — 17b4fb7 deleted the state
+    // it asserted on. See commit 6520378.
 }

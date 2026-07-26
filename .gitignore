@@ -31,3 +31,7 @@ Stash/Secrets.plist
 Stash/APIKeys.swift
 .env
 .env.*
+
+# LLVM coverage artifacts from local test runs
+*.profraw
+*.profdata

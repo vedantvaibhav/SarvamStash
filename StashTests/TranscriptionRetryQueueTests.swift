@@ -224,15 +224,9 @@ struct TranscriptionRetryQueueTests {
         #expect(uuids.contains(m2.sessionUUID))
     }
 
-    // `backoffStreamEmitsAttemptCountOnScheduledRetry` was removed here, with
-    // the `BackoffEventCollector` actor that supported it. Both depended on
-    // `TranscriptionRetryQueue.backoffStream()` and `BackoffEvent`, which
-    // commit 17b4fb7 deleted — its own message notes the stall modal "was the
-    // only consumer of isWaitingOnRetry/waitingRetryAttempt and of the queue's
-    // backoffStream, so that whole chain goes with it." The covering tests
-    // were not removed with it and stopped compiling.
+    // A backoffStream test was removed here — 17b4fb7 deleted the stream it
+    // asserted on. See commit 6520378.
 }
-
 
 /// Actor-protected counter so the upload-handler closure (called from
 /// detached tasks inside the queue) can record invocations without races.

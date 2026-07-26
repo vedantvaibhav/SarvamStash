@@ -405,6 +405,32 @@ final class TranscriptionService: NSObject, ObservableObject {
 
     // MARK: - LLM prompts
 
+    /// Self-correction and filler rules, shared verbatim by both short-clean
+    /// prompts.
+    ///
+    /// Neither block is register-specific — they are the same instruction to
+    /// the same model — so they were sitting duplicated at 3x the volume of
+    /// the anti-injection block that already got extracted. Edit a filler word
+    /// in one copy and the two modes silently diverge.
+    private nonisolated static let promptSelfCorrectionsAndFillers = """
+    SELF-CORRECTIONS (highest priority rule):
+    When the speaker corrects themselves mid-sentence, keep ONLY the final intended version — delete everything before the correction including the correction signal.
+    Examples (follow these exactly):
+    - "the meeting is at seven, no five" → "the meeting is at five"
+    - "on Monday, I mean Tuesday" → "on Tuesday"
+    - "we'll use React, or wait, Vue" → "we'll use Vue"
+    - "the deadline is... hmm... Friday" → "the deadline is Friday"
+    - "call John, aarah" → "call Sarah"
+    - "let's do this Thursday, no wait, next Monday" → "let's do this next Monday"
+
+    Do NOT treat these as self-corrections (keep the meaning, just clean filler):
+    - "No, I don't think that works" → "I don't think that works"
+    - "That's not right" → "That's not right"
+
+    FILLER WORDS — silently remove all of these:
+    um, uh, er, ah, like (when not comparative), you know, so (as opener), basically, literally, right (as filler), kind of, sort of, just (as filler), I mean (when not correcting), honestly, actually (when used as throat-clearing filler)
+    """
+
     /// The anti-injection guardrail, shared verbatim by both short-clean
     /// prompts. Extracted so the two register variants cannot drift on the one
     /// rule that is safety-critical rather than stylistic: a transcript is
@@ -432,22 +458,7 @@ final class TranscriptionService: NSObject, ObservableObject {
     private nonisolated static let promptShortCleanAsSpoken = """
     You are a transcript cleaner. Your only job is to make the speaker's words clean and paste-ready.
 
-    SELF-CORRECTIONS (highest priority rule):
-    When the speaker corrects themselves mid-sentence, keep ONLY the final intended version — delete everything before the correction including the correction signal.
-    Examples (follow these exactly):
-    - "the meeting is at seven, no five" → "the meeting is at five"
-    - "on Monday, I mean Tuesday" → "on Tuesday"
-    - "we'll use React, or wait, Vue" → "we'll use Vue"
-    - "the deadline is... hmm... Friday" → "the deadline is Friday"
-    - "call John, aarah" → "call Sarah"
-    - "let's do this Thursday, no wait, next Monday" → "let's do this next Monday"
-
-    Do NOT treat these as self-corrections (keep the meaning, just clean filler):
-    - "No, I don't think that works" → "I don't think that works"
-    - "That's not right" → "That's not right"
-
-    FILLER WORDS — silently remove all of these:
-    um, uh, er, ah, like (when not comparative), you know, so (as opener), basically, literally, right (as filler), kind of, sort of, just (as filler), I mean (when not correcting), honestly, actually (when used as throat-clearing filler)
+    \(promptSelfCorrectionsAndFillers)
 
     \(promptAntiInjection)
 
@@ -524,25 +535,7 @@ final class TranscriptionService: NSObject, ObservableObject {
       "we ship Friday"
     - If a phrase is ambiguous, keep it ambiguous rather than resolving it
 
-    SELF-CORRECTIONS (highest priority rule):
-    When the speaker corrects themselves mid-sentence, keep ONLY the final
-    intended version — delete everything before the correction including the
-    correction signal.
-    - "the meeting is at seven, no five" → "the meeting is at five"
-    - "on Monday, I mean Tuesday" → "on Tuesday"
-    - "we'll use React, or wait, Vue" → "we'll use Vue"
-    - "the deadline is... hmm... Friday" → "the deadline is Friday"
-    - "call John, aarah" → "call Sarah"
-    - "let's do this Thursday, no wait, next Monday" → "let's do this next Monday"
-
-    Do NOT treat these as self-corrections (keep the meaning, just clean filler):
-    - "No, I don't think that works" → "I don't think that works"
-    - "That's not right" → "That's not right"
-
-    FILLER WORDS — silently remove all of these:
-    um, uh, er, ah, like (when not comparative), you know, so (as opener),
-    basically, literally, right (as filler), kind of, sort of, just (as filler),
-    I mean (when not correcting), honestly, actually (throat-clearing filler)
+    \(promptSelfCorrectionsAndFillers)
 
     \(promptAntiInjection)
 
@@ -1349,11 +1342,6 @@ final class TranscriptionService: NSObject, ObservableObject {
             overview: "",
             durationSeconds: durationSeconds
         )
-        // No completion pill here. The note editor opening (just below) is
-        // itself the confirmation — a "Note saved" pill on top of it said the
-        // same thing twice, in the notch, over a window that had already
-        // appeared. Cleanup refines the same note silently afterwards.
-        //
         // Notify PanelController so it can auto-open the editor for the new
         // meeting note (matches the pre-rewrite UX). Short path intentionally
         // does NOT fire this — short-clip primary delivery is pasteboard +

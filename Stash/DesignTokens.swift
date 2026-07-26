@@ -130,17 +130,6 @@ enum DesignTokens {
         /// Band height at the dimmest point of the breathe, as a fraction of
         /// `glowBandHeight`. Keeps the glow present rather than blinking out.
         static let glowPulseMinScale: CGFloat = 0.62
-        static let glowBaseOpacity: Double = 0.65
-        /// Failure states glow harder. `glowBaseOpacity` was tuned for the
-        /// recording state, where the audio level adds up to
-        /// `glowLevelOpacityBoost` on top — outside recording that term is 0,
-        /// so a failure sat at the dimmest setting the pill has while being
-        /// the one state the user most needs to notice. It also only shows for
-        /// `completionDefaultHold` (1.6s), so it has one brief chance to land.
-        static let glowFailureOpacity: Double = 0.98
-        /// Failures also get a taller band — same reasoning, and it costs
-        /// nothing: the band is drawn inside the slab and clipped to it.
-        static let glowFailureBandMultiplier: CGFloat = 1.35
         static let glowLevelOpacityBoost: Double = 0.40
         static let glowLevelSmoothing: TimeInterval = 0.12
         // The glow carries STATE, not just decoration — it is readable from
@@ -149,32 +138,60 @@ enum DesignTokens {
         // the bloom reads as a gradient rather than two flat ends, and all
         // three land at the same visual weight through the same blur and mask.
 
+        /// Everything the glow needs for one state, in one place.
+        ///
+        /// Previously the colours, the opacity and the band height were three
+        /// separate lookups branched at three separate call sites, so adding a
+        /// state meant remembering all three — and `processing` ended up
+        /// inheriting the recording-tuned opacity by omission rather than by
+        /// choice. Bundling them forces every state to answer all three.
+        struct GlowStyle {
+            let colors: [Color]
+            let baseOpacity: Double
+            /// Multiplier on `glowBandHeight`.
+            let bandMultiplier: CGFloat
+        }
+
         /// Listening — the original "Sexy Blue" ramp, #007BFF → #B0E0E6.
-        static let glowColorsListening: [Color] = [
-            Color(red: 0.000, green: 0.482, blue: 1.000),  // #007BFF
-            Color(red: 0.231, green: 0.584, blue: 0.980),  // #3B95FA
-            Color(red: 0.463, green: 0.686, blue: 0.957),  // #76AFF4
-            Color(red: 0.690, green: 0.878, blue: 0.902)   // #B0E0E6
-        ]
+        static let glowListening = GlowStyle(
+            colors: [
+                Color(hex: "#007BFF"), Color(hex: "#3B95FA"),
+                Color(hex: "#76AFF4"), Color(hex: "#B0E0E6")
+            ],
+            baseOpacity: 0.65,
+            bandMultiplier: 1
+        )
 
-        /// Processing — neutral greyscale, #6E6E73 → #F2F2F7. Deliberately
-        /// colourless: the work is indeterminate, so the pill should read as
-        /// "busy" without implying an outcome.
-        static let glowColorsProcessing: [Color] = [
-            Color(red: 0.431, green: 0.431, blue: 0.451),  // #6E6E73
-            Color(red: 0.596, green: 0.596, blue: 0.616),  // #98989D
-            Color(red: 0.780, green: 0.780, blue: 0.800),  // #C7C7CC
-            Color(red: 0.949, green: 0.949, blue: 0.969)   // #F2F2F7
-        ]
+        /// Processing — neutral greyscale. Deliberately colourless: the work
+        /// is indeterminate, so the pill reads as "busy" without implying an
+        /// outcome. Shares listening's opacity intentionally, not by default.
+        static let glowProcessing = GlowStyle(
+            colors: [
+                Color(hex: "#6E6E73"), Color(hex: "#98989D"),
+                Color(hex: "#C7C7CC"), Color(hex: "#F2F2F7")
+            ],
+            baseOpacity: 0.65,
+            bandMultiplier: 1
+        )
 
-        /// Failure — #FF3B30 → #FFC4C0, mirroring the blue ramp's structure so
-        /// the swap reads as a colour change rather than a brightness one.
-        static let glowColorsFailure: [Color] = [
-            Color(red: 1.000, green: 0.231, blue: 0.188),  // #FF3B30
-            Color(red: 1.000, green: 0.384, blue: 0.349),  // #FF6259
-            Color(red: 1.000, green: 0.541, blue: 0.522),  // #FF8A85
-            Color(red: 1.000, green: 0.769, blue: 0.753)   // #FFC4C0
-        ]
+        /// Failure — mirrors the blue ramp's structure so the swap reads as a
+        /// colour change rather than a brightness one.
+        ///
+        /// Brighter and taller than the others on purpose. The base opacity
+        /// was tuned for RECORDING, where the live audio level adds up to
+        /// `glowLevelOpacityBoost` on top; outside recording that term is 0,
+        /// so a failure would otherwise render at the dimmest setting the pill
+        /// has while being the state the user most needs to notice — and it
+        /// only shows for `completionDefaultHold`, so it gets one brief chance
+        /// to land.
+        static let glowFailure = GlowStyle(
+            colors: [
+                Color(hex: "#FF3B30"), Color(hex: "#FF6259"),
+                Color(hex: "#FF8A85"), Color(hex: "#FFC4C0")
+            ],
+            baseOpacity: 0.98,
+            bandMultiplier: 1.35
+        )
 
         // MARK: Recording level meter (right of the notch)
         static let levelMeterBarCount: Int = 4
