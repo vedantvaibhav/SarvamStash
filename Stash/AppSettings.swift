@@ -27,49 +27,43 @@ enum QuickPanelLayoutStyle: String, CaseIterable, Identifiable {
 /// What Saaras should return for regional-language speech. Maps 1:1 onto
 /// Sarvam's `mode` form field, which only `saaras:v3` honours.
 ///
-/// `language_code` is optional on all three, so every option supports
+/// `language_code` is optional on both, so either option supports
 /// auto-detected multilingual input — nothing here pins a language.
+///
+/// A third case, Hinglish (Saaras `mode="codemix"`), was offered briefly and
+/// removed: forcing Hindi and English onto one Latin-script line overshot what
+/// people wanted, and Saaras is least predictable in that mode. Sarvam's API
+/// still has it; we no longer send it. Anyone holding the old `"codemix"`
+/// preference falls through to the default below.
 enum SarvamOutputMode: String, CaseIterable {
     /// Saaras `mode="translate"` — speech in any language comes back as
     /// English, then rewritten to read casually by the short-clean pass.
     case english = "english"
-    /// Saaras `mode="transcribe"` — each language in its own script, pasted
-    /// as-is. Tamil stays Tamil, Hindi stays Devanagari.
+    /// Saaras `mode="transcribe"` — whatever language you speak comes back in
+    /// that language's own script. Speak English, get English; speak Hindi,
+    /// get Devanagari; mix Tamil and Hindi and English and each lands in its
+    /// own script. Nothing is translated or transliterated.
     case native = "native"
-    /// Saaras `mode="codemix"` — Hindi and English forced onto one
-    /// Latin-script line.
-    ///
-    /// BETA. Saaras is least predictable in this mode: it transliterates even
-    /// when the speaker stayed in one language, which is why it is labelled
-    /// as beta rather than offered as a peer of the other two.
-    ///
-    /// The rawValue is deliberately "codemix", not "hinglish" — it is both
-    /// Sarvam's wire value and the value already persisted in UserDefaults by
-    /// earlier builds, so existing preferences keep resolving.
-    case hinglish = "codemix"
 
     /// The literal value sent as Sarvam's `mode` field.
     var sarvamMode: String {
         switch self {
-        case .english:  return "translate"
-        case .native:   return "transcribe"
-        case .hinglish: return "codemix"
+        case .english: return "translate"
+        case .native:  return "transcribe"
         }
     }
 
     var label: String {
         switch self {
-        case .english:  return "English"
-        case .native:   return "As spoken"
-        case .hinglish: return "Hinglish (beta)"
+        case .english: return "English"
+        case .native:  return "Native"
         }
     }
 
     var detail: String {
         switch self {
-        case .english:  return "Translated into natural, casual English"
-        case .native:   return "Exactly as spoken, in its original script"
-        case .hinglish: return "Beta — Hindi and English merged into one Latin-script line"
+        case .english: return "Translated into natural, casual English"
+        case .native:  return "Exactly as spoken, in its original script"
         }
     }
 }
@@ -201,8 +195,9 @@ final class AppSettings: ObservableObject {
         let savedLogin = ud.object(forKey: Keys.launchAtLogin) as? Bool
         launchAtLogin = savedLogin ?? false
 
-        // `.english` default. Deliberately NOT `.hinglish`: that option is
-        // beta, and a fresh install should not land on it.
+        // `.english` default. A saved `"codemix"` from the removed Hinglish
+        // option fails this rawValue lookup and lands here — a silent one-time
+        // reset, accepted rather than migrated.
         let savedSarvamMode = ud.string(forKey: Keys.sarvamOutputMode) ?? SarvamOutputMode.english.rawValue
         sarvamOutputMode = SarvamOutputMode(rawValue: savedSarvamMode) ?? .english
 

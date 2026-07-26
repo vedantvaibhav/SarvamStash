@@ -452,9 +452,9 @@ final class TranscriptionService: NSObject, ObservableObject {
     cons list.
     """
 
-    /// Short-clip cleanup for `.native` ("As spoken") and `.hinglish`.
-    /// Grammar, fillers and self-corrections only: the speaker's own words and
-    /// script are the point of both modes, so register is preserved untouched.
+    /// Short-clip cleanup for `.native`. Grammar, fillers and self-corrections
+    /// only: the speaker's own words and script are the point of that mode, so
+    /// register is preserved untouched.
     private nonisolated static let promptShortCleanAsSpoken = """
     You are a transcript cleaner. Your only job is to make the speaker's words clean and paste-ready.
 
@@ -585,13 +585,13 @@ final class TranscriptionService: NSObject, ObservableObject {
     /// Picks the short-clip cleanup prompt for `mode`.
     ///
     /// Only `.english` gets the register rewrite — it is the one mode whose
-    /// Saaras output is a machine translation. `.native` and `.hinglish` are
-    /// both "give me back what I said" modes: rewriting their register would
-    /// undo the thing the user picked them for.
+    /// Saaras output is a machine translation. `.native` is the
+    /// give-me-back-what-I-said mode, so rewriting its register would undo the
+    /// thing the user picked it for.
     nonisolated static func shortCleanPrompt(for mode: SarvamOutputMode) -> String {
         switch mode {
-        case .english:            return promptShortCleanCasualEnglish
-        case .native, .hinglish:  return promptShortCleanAsSpoken
+        case .english: return promptShortCleanCasualEnglish
+        case .native:  return promptShortCleanAsSpoken
         }
     }
 
