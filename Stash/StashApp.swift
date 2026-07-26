@@ -321,7 +321,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func debugMenuItems() -> [(String, Selector)] {
         return [
             ("Test pill: filter rejection",  #selector(debugTestPillRejection)),
-            ("Test pill: cleanup failure",   #selector(debugTestPillCleanupFailure)),
             ("Test pill: network timeout",   #selector(debugTestPillNetworkTimeout)),
             ("Test pill: 5 min warning",     #selector(debugTestPill5MinWarning)),
             ("Test pill: 90-min hard stop",  #selector(debugTestPill90MinHardStop)),
@@ -340,7 +339,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func debugTestPillRejection()      { debugFirePill("No audio") }
-    @objc private func debugTestPillCleanupFailure() { debugFirePill("Note saved") }
     @objc private func debugTestPillNetworkTimeout() { debugFirePill("Network timeout") }
     @objc private func debugTestPill5MinWarning()    { debugFirePill("5 min left", hold: DesignTokens.Pill.completionWarningHold) }
     @objc private func debugTestPill90MinHardStop()  { debugFirePill("90-min limit") }

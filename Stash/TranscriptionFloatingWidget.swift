@@ -145,7 +145,7 @@ struct TranscriptionPillView: View {
         // Clip to the slab so content can't overflow the rounded corners
         // while the AppKit panel is mid-resize.
         .clipShape(pillShape)
-        .overlay(recordingGlow)
+        .overlay(edgeGlow)
         .animation(.easeInOut(duration: DesignTokens.Pill.contentTransitionDuration),
                    value: mode)
     }
@@ -171,20 +171,24 @@ struct TranscriptionPillView: View {
         )
     }
 
-    // MARK: Recording glow
+    // MARK: Edge glow
     //
-    // A soft, multi-coloured bloom hugging the BOTTOM edge only, shown ONLY
-    // while recording — the BorderBeam look adapted to a slab whose top edge
-    // is flush with the screen and therefore has no visible border. It stays
+    // A soft, multi-coloured bloom hugging the BOTTOM edge only — the
+    // BorderBeam look adapted to a slab whose top edge is flush with the
+    // screen and therefore has no visible border.
+    //
+    // Shown in EVERY mode, not just recording. The glow is the pill's
+    // identity, so gating it on `.recording` made the slab look like a
+    // different object once the spinner appeared. Outside recording
+    // `audioLevel` is 0, so the level-driven opacity term falls away and the
+    // glow sits steady at `glowBaseOpacity` while still breathing. It stays
     // put and breathes vertically; an earlier version slid a highlight
     // left-to-right, which read as busy and distracting.
     // `TimelineView(.animation)` re-evaluates every display frame so the
     // breathe is driven by wall-clock time and stays smooth regardless of
     // how often the audio level or the pill's mode updates.
 
-    @ViewBuilder
-    private var recordingGlow: some View {
-        if case .recording = mode {
+    private var edgeGlow: some View {
             TimelineView(.animation) { timeline in
                 // Slow sine, 0...1. Constant period rather than audio-driven:
                 // phase is derived from absolute time, so varying the period
@@ -219,13 +223,44 @@ struct TranscriptionPillView: View {
             // Louder input → brighter glow. Applied outside the TimelineView
             // so the implicit animation can smooth the level meter's 10 Hz
             // steps into continuous movement.
-            .opacity(
-                DesignTokens.Pill.glowBaseOpacity
-                    + Double(normalizedAudioLevel) * DesignTokens.Pill.glowLevelOpacityBoost
-            )
+            .opacity(glowStyle.baseOpacity
+                + Double(normalizedAudioLevel) * DesignTokens.Pill.glowLevelOpacityBoost)
             .animation(.easeOut(duration: DesignTokens.Pill.glowLevelSmoothing), value: audioLevel)
             // Purely decorative — must never intercept the stop tap.
             .allowsHitTesting(false)
+    }
+
+    /// Everything the glow needs for the current mode, resolved once.
+    ///
+    /// The glow is the fastest-read part of the pill — colour lands before the
+    /// label does, especially at the edge of vision where the notch sits. One
+    /// lookup rather than three parallel branches, so a new state cannot be
+    /// half-added.
+    ///
+    /// Non-failure completions stay on the listening blue. That covers the
+    /// mid-recording warnings ("5 min left", "Almost full"), which flash and
+    /// then return to recording — turning those red would read as an error
+    /// when nothing has gone wrong.
+    private var glowStyle: DesignTokens.Pill.GlowStyle {
+        switch mode {
+        case .recording:
+            return DesignTokens.Pill.glowListening
+        case .processing:
+            return DesignTokens.Pill.glowProcessing
+        case .completion(let message):
+            return Self.isFailureMessage(message)
+                ? DesignTokens.Pill.glowFailure
+                : DesignTokens.Pill.glowListening
+        }
+    }
+
+    /// Which completion messages represent a failed outcome. Mirrors the
+    /// vocabulary `completionSymbol(for:)` switches on — both must be updated
+    /// together when a new message is added.
+    private static func isFailureMessage(_ message: String) -> Bool {
+        switch message {
+        case "Failed", "No audio": return true
+        default:                   return false
         }
     }
 
@@ -235,16 +270,11 @@ struct TranscriptionPillView: View {
     /// rounded corners.
     private func glowSegment(scale: CGFloat, anchor: HorizontalEdge?) -> some View {
         LinearGradient(
-            colors: [
-                DesignTokens.Pill.glowColorA,
-                DesignTokens.Pill.glowColorB,
-                DesignTokens.Pill.glowColorC,
-                DesignTokens.Pill.glowColorD
-            ],
+            colors: glowStyle.colors,
             startPoint: .leading,
             endPoint: .trailing
         )
-        .frame(height: DesignTokens.Pill.glowBandHeight * scale)
+        .frame(height: DesignTokens.Pill.glowBandHeight * scale * glowStyle.bandMultiplier)
         .mask(
             LinearGradient(colors: [.clear, .white], startPoint: .top, endPoint: .bottom)
         )
@@ -272,9 +302,14 @@ struct TranscriptionPillView: View {
                 .init(color: .clear, location: 1.0)
             ]
         case .trailing:  // right strip — bright at its right edge
+            // Ramps in far earlier than the leading strip's mirror image
+            // would. The right strip is about half the left's width (the
+            // notch is not centred over the slab), so lighting only its outer
+            // 30% left ~14pt to survive a 10pt blur — which is why the glow
+            // read as left-only.
             return [
                 .init(color: .clear, location: 0.0),
-                .init(color: .white, location: 0.70),
+                .init(color: .white, location: 0.35),
                 .init(color: .white, location: 1.0)
             ]
         case .none:      // un-notched fallback: soften both ends
@@ -353,7 +388,6 @@ struct TranscriptionPillView: View {
     private func completionSymbol(for message: String) -> String {
         switch message {
         case "Copied":      return "checkmark"
-        case "Note saved":  return "note.text"
         case "Failed":      return "xmark"
         case "No audio":    return "mic.slash"
         default:            return "checkmark"
@@ -416,6 +450,21 @@ struct TranscriptionPillView: View {
             iconGlyph
         }
     }
+
+    /// Width reserved for the right-hand indicator in every mode: the widest
+    /// of the level meter, the spinner, and the completion glyph.
+    ///
+    /// Defined here rather than on the controller because both need it and
+    /// they must not disagree — the view lays out against it, the controller
+    /// measures the panel with it.
+    static let indicatorReservedWidth: CGFloat = {
+        let barCount = CGFloat(DesignTokens.Pill.levelMeterBarCount)
+        let meter = barCount * DesignTokens.Pill.levelMeterBarWidth
+            + max(0, barCount - 1) * DesignTokens.Pill.levelMeterBarSpacing
+        // `ProgressView` at `.small` control size renders ~16pt square.
+        let spinner: CGFloat = 16
+        return max(meter, max(spinner, DesignTokens.Pill.iconGlyphSize))
+    }()
 }
 
 /// Drives the pill's content cross-fade: opacity + blur + scale, applied in
@@ -667,7 +716,7 @@ final class TranscriptionFloatingWidgetController: NSObject {
         // Completion supersedes recording so mid-recording warnings (85-min,
         // 20-MB) can briefly flash on the pill, then return to recording mode
         // when their hold expires (see expireCompletion). End-of-recording
-        // completions ("Note saved", "No audio", "Failed") work the same way,
+        // completions ("No audio", "Failed") work the same way,
         // they just see isRecording==false at expiry and hide instead.
         //
         // Ghost-flash guard: residual completion state at the start of a new
@@ -790,10 +839,10 @@ final class TranscriptionFloatingWidgetController: NSObject {
         )
     }
 
-    /// Pill width is dynamic — measured per displayed mode using NSString
-    /// font sizing so the AppKit panel auto-fits whatever message is being
-    /// shown. "Failed" gets a small pill, "Note saved" gets a larger pill,
-    /// no slack on either side regardless of message length.
+    /// Pill width is CONSTANT across every mode — sized once, with NSString
+    /// font sizing, against the widest label the pill can show. Previously it
+    /// was measured per message, which made the slab snap inward when a short
+    /// result like "Failed" replaced "Processing".
     ///
     /// Reads `displayState.mode` (which `sync()` sets via `updateHosted`
     /// BEFORE calling applyPhaseFrame), so the size always reflects the
@@ -828,7 +877,7 @@ final class TranscriptionFloatingWidgetController: NSObject {
             : DesignTokens.Pill.compactContentGap
         let width = leadingContentWidth()
             + gap
-            + currentIndicatorWidth()
+            + TranscriptionPillView.indicatorReservedWidth
             + DesignTokens.Pill.trailingPadding
             + Self.measurementSafetyMargin
             // Room for the concave flare on each side, so the body keeps the
@@ -844,12 +893,21 @@ final class TranscriptionFloatingWidgetController: NSObject {
     private func leadingContentWidth() -> CGFloat {
         let labelW: CGFloat
         switch displayState.mode {
-        // Recording and processing share ONE measurement so the slab keeps a
-        // constant width and x-origin across the Listening… → Processing
-        // swap: only the text cross-fades, the pill itself never resizes or
-        // shifts. Uses the wider of the two so neither label is clipped.
-        case .recording, .processing:  labelW = Self.steadyLabelWidth
-        case .completion(let msg):     labelW = measureLabelWidth(msg, font: Self.completionLabelFont)
+        // EVERY mode reserves the same label width, so the slab never resizes
+        // or shifts for the whole recording → processing → completion
+        // lifecycle: only the text cross-fades. Previously only recording and
+        // processing shared a measurement while completion measured its own
+        // message, which made the pill snap inward when a result landed.
+        //
+        // `max` with the live measurement is a clipping guard, not a resize
+        // path: every production message is inside `steadyLabelWidth`, so it
+        // never engages. Only a DEBUG-menu string long enough to overflow
+        // widens the slab, which is the right trade for a debug seam.
+        case .recording, .processing:
+            labelW = Self.steadyLabelWidth
+        case .completion(let msg):
+            labelW = max(Self.steadyLabelWidth,
+                         Self.measure(msg, font: Self.completionLabelFont))
         }
         return DesignTokens.Pill.leadingPadding
             + labelW
@@ -863,40 +921,37 @@ final class TranscriptionFloatingWidgetController: NSObject {
         leadingContentWidth() + DesignTokens.Pill.notchTopFlareRadius
     }
 
-    /// Wider of the two in-progress labels — see `leadingContentWidth`. Both
-    /// inputs are compile-time constants and the font is static, so this is
-    /// measured once rather than on every 10 Hz sync tick.
-    private static let steadyLabelWidth: CGFloat = max(
-        measure(TranscriptionPillView.recordingLabelText, font: completionLabelFont),
-        measure(TranscriptionPillView.processingLabelText, font: completionLabelFont)
-    )
+    /// Every label the pill can show in production. The slab reserves the
+    /// width of the widest, in EVERY mode, so it never resizes mid-lifecycle.
+    ///
+    /// Kept beside the strings themselves rather than derived at the call
+    /// sites: `showCompletion` takes a free-form `String`, so there is no
+    /// compiler check tying these together. A new production message wider
+    /// than the current widest must be added here, or the pill will resize
+    /// for it — the `max` guard in `leadingContentWidth` keeps it from
+    /// clipping in the meantime.
+    private static let allPillLabelTexts: [String] = [
+        TranscriptionPillView.recordingLabelText,   // "Listening…"
+        TranscriptionPillView.processingLabelText,  // "Processing"
+        "Pasted ✓",
+        "Copied",
+        "Failed",
+        "No audio",
+        "5 min left",
+        "Almost full"
+    ]
+
+    /// Widest production label — see `allPillLabelTexts`. All inputs are
+    /// compile-time constants and the font is static, so this is measured once
+    /// rather than on every 10 Hz sync tick.
+    private static let steadyLabelWidth: CGFloat =
+        allPillLabelTexts
+            .map { measure($0, font: completionLabelFont) }
+            .max() ?? 0
 
     private static func measure(_ text: String, font: NSFont) -> CGFloat {
         ceil((text as NSString).size(withAttributes: [.font: font]).width)
     }
-
-    /// Rendered width of the right-hand mode indicator.
-    private func currentIndicatorWidth() -> CGFloat {
-        switch displayState.mode {
-        // Same reasoning as `steadyLabelWidth`: the meter and the spinner
-        // reserve identical space so the swap doesn't nudge the width.
-        case .recording, .processing:
-            return max(Self.levelMeterWidth, Self.spinnerIndicatorWidth)
-        case .completion:
-            return DesignTokens.Pill.iconGlyphSize
-        }
-    }
-
-    /// Rendered widths of the right-hand indicators, mirroring what the
-    /// SwiftUI side lays out so the slab measures correctly.
-    private static var levelMeterWidth: CGFloat {
-        let count = CGFloat(DesignTokens.Pill.levelMeterBarCount)
-        return count * DesignTokens.Pill.levelMeterBarWidth
-            + max(0, count - 1) * DesignTokens.Pill.levelMeterBarSpacing
-    }
-
-    /// `ProgressView` at `.small` control size renders ~16pt square.
-    private static let spinnerIndicatorWidth: CGFloat = 16
 
     /// SwiftUI's Text rendering can disagree with NSString.size by a sub-pt
     /// fraction; a 2pt safety margin avoids the very-last character being
@@ -904,11 +959,6 @@ final class TranscriptionFloatingWidgetController: NSObject {
     private static let measurementSafetyMargin: CGFloat = 2
 
     private static let completionLabelFont = NSFont.systemFont(ofSize: 14, weight: .regular)
-
-    private func measureLabelWidth(_ text: String, font: NSFont) -> CGFloat {
-        let attrs: [NSAttributedString.Key: Any] = [.font: font]
-        return ceil((text as NSString).size(withAttributes: attrs).width)
-    }
 
     private func cancelAllPendingWork(except keep: Phase = .none) {
         if keep != .completion {

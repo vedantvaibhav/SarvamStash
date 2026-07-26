@@ -24,6 +24,50 @@ enum QuickPanelLayoutStyle: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
+/// What Saaras should return for regional-language speech. Maps 1:1 onto
+/// Sarvam's `mode` form field, which only `saaras:v3` honours.
+///
+/// `language_code` is optional on both, so either option supports
+/// auto-detected multilingual input — nothing here pins a language.
+///
+/// A third case, Hinglish (Saaras `mode="codemix"`), was offered briefly and
+/// removed: forcing Hindi and English onto one Latin-script line overshot what
+/// people wanted, and Saaras is least predictable in that mode. Sarvam's API
+/// still has it; we no longer send it. Anyone holding the old `"codemix"`
+/// preference falls through to the default below.
+enum SarvamOutputMode: String, CaseIterable {
+    /// Saaras `mode="translate"` — speech in any language comes back as
+    /// English, then rewritten to read casually by the short-clean pass.
+    case english = "english"
+    /// Saaras `mode="transcribe"` — whatever language you speak comes back in
+    /// that language's own script. Speak English, get English; speak Hindi,
+    /// get Devanagari; mix Tamil and Hindi and English and each lands in its
+    /// own script. Nothing is translated or transliterated.
+    case native = "native"
+
+    /// The literal value sent as Sarvam's `mode` field.
+    var sarvamMode: String {
+        switch self {
+        case .english: return "translate"
+        case .native:  return "transcribe"
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .english: return "English"
+        case .native:  return "Native"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .english: return "Translated into natural, casual English"
+        case .native:  return "Exactly as spoken, in its original script"
+        }
+    }
+}
+
 // MARK: - Double-tap quick record
 
 enum DoubleTapQuickRecord: String, CaseIterable {
@@ -104,6 +148,14 @@ final class AppSettings: ObservableObject {
         didSet { ud.set(launchAtLogin, forKey: Keys.launchAtLogin) }
     }
 
+    // MARK: Transcription output
+
+    /// Regional-language output mode for Sarvam Saaras. Read on every Saaras
+    /// call and passed through as `mode`.
+    @Published var sarvamOutputMode: SarvamOutputMode {
+        didSet { ud.set(sarvamOutputMode.rawValue, forKey: Keys.sarvamOutputMode) }
+    }
+
     // MARK: Notes filter
 
     /// Active filter applied to the Notes tab list. Persisted as raw
@@ -143,6 +195,12 @@ final class AppSettings: ObservableObject {
         let savedLogin = ud.object(forKey: Keys.launchAtLogin) as? Bool
         launchAtLogin = savedLogin ?? false
 
+        // `.english` default. A saved `"codemix"` from the removed Hinglish
+        // option fails this rawValue lookup and lands here — a silent one-time
+        // reset, accepted rather than migrated.
+        let savedSarvamMode = ud.string(forKey: Keys.sarvamOutputMode) ?? SarvamOutputMode.english.rawValue
+        sarvamOutputMode = SarvamOutputMode(rawValue: savedSarvamMode) ?? .english
+
         let savedNotesFilter = ud.string(forKey: Keys.notesActiveFilter) ?? NotesFilter.all.rawValue
         notesActiveFilter = NotesFilter(rawValue: savedNotesFilter) ?? .all
 
@@ -168,6 +226,7 @@ final class AppSettings: ObservableObject {
         static let quickRecordHotKeyCode      = "qp.quickRecordHotKeyCode"
         static let quickRecordHotKeyModifiers = "qp.quickRecordHotKeyModifiers"
         static let doubleTapQuickRecord       = "qp.doubleTapQuickRecord"
+        static let sarvamOutputMode           = "qp.sarvamOutputMode"
         static let notesActiveFilter          = "qp.notesActiveFilter"
     }
 }

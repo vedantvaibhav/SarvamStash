@@ -224,35 +224,8 @@ struct TranscriptionRetryQueueTests {
         #expect(uuids.contains(m2.sessionUUID))
     }
 
-    @Test func backoffStreamEmitsAttemptCountOnScheduledRetry() async throws {
-        let (queue, persistence, root) = try makeQueue()
-        defer { cleanup(root) }
-        let meta = try seed(persistence)   // attemptCount 0
-
-        let collector = BackoffEventCollector()
-        let streamTask = Task {
-            for await event in queue.backoffStream() {
-                await collector.record(event)
-            }
-        }
-        // Let the stream's observer register on the actor before we trigger
-        // the failure that should emit an event.
-        await drain()
-
-        // Transient failure → bumpAttempt → scheduleAttempt(delay: 2) →
-        // backoffStream emits with the incremented attemptCount.
-        await queue.setUploadHandler { _ in false }
-        await queue.enqueue(meta)
-        await drain()
-
-        streamTask.cancel()
-        let events = await collector.events
-        #expect(events.contains {
-            $0.sessionUUID == meta.sessionUUID
-                && $0.attemptCount == 1
-                && $0.nextDelaySeconds == 2
-        }, "first transient failure should emit a backoff event at attemptCount 1 / 2s delay")
-    }
+    // A backoffStream test was removed here — 17b4fb7 deleted the stream it
+    // asserted on. See commit 6520378.
 }
 
 /// Actor-protected counter so the upload-handler closure (called from
@@ -260,10 +233,4 @@ struct TranscriptionRetryQueueTests {
 private actor AttemptCounter {
     private(set) var value: Int = 0
     func bump() { value += 1 }
-}
-
-/// Actor-protected collector for backoff events observed off the stream.
-private actor BackoffEventCollector {
-    private(set) var events: [BackoffEvent] = []
-    func record(_ event: BackoffEvent) { events.append(event) }
 }
