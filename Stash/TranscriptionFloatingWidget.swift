@@ -223,10 +223,7 @@ struct TranscriptionPillView: View {
             // Louder input → brighter glow. Applied outside the TimelineView
             // so the implicit animation can smooth the level meter's 10 Hz
             // steps into continuous movement.
-            .opacity(
-                DesignTokens.Pill.glowBaseOpacity
-                    + Double(normalizedAudioLevel) * DesignTokens.Pill.glowLevelOpacityBoost
-            )
+            .opacity(glowOpacity)
             .animation(.easeOut(duration: DesignTokens.Pill.glowLevelSmoothing), value: audioLevel)
             // Purely decorative — must never intercept the stop tap.
             .allowsHitTesting(false)
@@ -254,6 +251,22 @@ struct TranscriptionPillView: View {
         }
     }
 
+    /// True when the CURRENT mode is a failed result. Drives the louder
+    /// failure glow as well as the red ramp.
+    private var isFailureGlow: Bool {
+        if case .completion(let message) = mode { return Self.isFailureMessage(message) }
+        return false
+    }
+
+    /// Louder for failures — see `glowFailureOpacity`. The audio-level term
+    /// only contributes while recording, where `audioLevel` is non-zero.
+    private var glowOpacity: Double {
+        let base = isFailureGlow
+            ? DesignTokens.Pill.glowFailureOpacity
+            : DesignTokens.Pill.glowBaseOpacity
+        return base + Double(normalizedAudioLevel) * DesignTokens.Pill.glowLevelOpacityBoost
+    }
+
     /// Which completion messages represent a failed outcome. Mirrors the
     /// vocabulary `completionSymbol(for:)` switches on — both must be updated
     /// together when a new message is added.
@@ -274,7 +287,8 @@ struct TranscriptionPillView: View {
             startPoint: .leading,
             endPoint: .trailing
         )
-        .frame(height: DesignTokens.Pill.glowBandHeight * scale)
+        .frame(height: DesignTokens.Pill.glowBandHeight * scale
+            * (isFailureGlow ? DesignTokens.Pill.glowFailureBandMultiplier : 1))
         .mask(
             LinearGradient(colors: [.clear, .white], startPoint: .top, endPoint: .bottom)
         )
@@ -302,9 +316,14 @@ struct TranscriptionPillView: View {
                 .init(color: .clear, location: 1.0)
             ]
         case .trailing:  // right strip — bright at its right edge
+            // Ramps in far earlier than the leading strip's mirror image
+            // would. The right strip is about half the left's width (the
+            // notch is not centred over the slab), so lighting only its outer
+            // 30% left ~14pt to survive a 10pt blur — which is why the glow
+            // read as left-only.
             return [
                 .init(color: .clear, location: 0.0),
-                .init(color: .white, location: 0.70),
+                .init(color: .white, location: 0.35),
                 .init(color: .white, location: 1.0)
             ]
         case .none:      // un-notched fallback: soften both ends

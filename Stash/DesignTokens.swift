@@ -131,6 +131,16 @@ enum DesignTokens {
         /// `glowBandHeight`. Keeps the glow present rather than blinking out.
         static let glowPulseMinScale: CGFloat = 0.62
         static let glowBaseOpacity: Double = 0.65
+        /// Failure states glow harder. `glowBaseOpacity` was tuned for the
+        /// recording state, where the audio level adds up to
+        /// `glowLevelOpacityBoost` on top — outside recording that term is 0,
+        /// so a failure sat at the dimmest setting the pill has while being
+        /// the one state the user most needs to notice. It also only shows for
+        /// `completionDefaultHold` (1.6s), so it has one brief chance to land.
+        static let glowFailureOpacity: Double = 0.98
+        /// Failures also get a taller band — same reasoning, and it costs
+        /// nothing: the band is drawn inside the slab and clipped to it.
+        static let glowFailureBandMultiplier: CGFloat = 1.35
         static let glowLevelOpacityBoost: Double = 0.40
         static let glowLevelSmoothing: TimeInterval = 0.12
         // The glow carries STATE, not just decoration — it is readable from
