@@ -899,10 +899,16 @@ final class TranscriptionFloatingWidgetController: NSObject {
     private func leadingContentWidth() -> CGFloat {
         let labelW: CGFloat
         switch displayState.mode {
-        // Recording and processing share ONE measurement so the slab keeps a
-        // constant width and x-origin across the Listening… → Processing
-        // swap: only the text cross-fades, the pill itself never resizes or
-        // shifts. Uses the wider of the two so neither label is clipped.
+        // EVERY mode reserves the same label width, so the slab never resizes
+        // or shifts for the whole recording → processing → completion
+        // lifecycle: only the text cross-fades. Previously only recording and
+        // processing shared a measurement while completion measured its own
+        // message, which made the pill snap inward when a result landed.
+        //
+        // `max` with the live measurement is a clipping guard, not a resize
+        // path: every production message is inside `steadyLabelWidth`, so it
+        // never engages. Only a DEBUG-menu string long enough to overflow
+        // widens the slab, which is the right trade for a debug seam.
         case .recording, .processing:
             labelW = Self.steadyLabelWidth
         case .completion(let msg):
